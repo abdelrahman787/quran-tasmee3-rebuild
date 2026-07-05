@@ -53,7 +53,12 @@ final sessionLoggerProvider = Provider<SessionLogger>((ref) {
 // ═══════════════════════════════════════════════════════════════════════════
 // SWAP POINT 3: Review Repositories
 // ═══════════════════════════════════════════════════════════════════════════
-// To use Firestore-backed repos: replace InMemory* with Firestore* repos.
+// Phase 5: The app now overrides these with Hive/SharedPreferences-backed
+// implementations via ProviderScope in main().  The in-memory defaults remain
+// here so that widget tests work without Hive initialization.
+//
+// To use Firestore-backed repos: override these providers with Firestore* repos
+// in main() instead.
 // ═══════════════════════════════════════════════════════════════════════════
 
 final weakItemRepoProvider = Provider<WeakItemRepository>((ref) {
