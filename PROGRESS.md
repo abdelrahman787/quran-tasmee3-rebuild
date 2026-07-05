@@ -105,12 +105,14 @@ org.gradle.jvmargs=-Xmx3G -XX:MaxMetaspaceSize=1G -XX:ReservedCodeCacheSize=256m
 ### compileSdk Force-Bump (`android/build.gradle.kts`)
 
 ```kotlin
+// Force every android-library subproject to compileSdk 35 so third-party
+// plugins pinned to an older compileSdk don't fail AndroidX AAR metadata
+// checks. gradle.afterProject fires AFTER each project's own build script,
+// so this always wins regardless of evaluation order.
+// (spec §3.14 — verified working pattern for AGP 9)
 gradle.afterProject {
-    if (project.hasProperty("android")) {
-        val androidExt = project.extensions.findByName("android")
-        if (androidExt is com.android.build.gradle.BaseExtension) {
-            androidExt.compileSdkVersion("android-35")
-        }
+    extensions.findByType<com.android.build.api.dsl.LibraryExtension>()?.run {
+        if ((compileSdk ?: 0) < 35) compileSdk = 35
     }
 }
 ```
