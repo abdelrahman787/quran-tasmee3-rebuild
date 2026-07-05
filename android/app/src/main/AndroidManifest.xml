@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Microphone permission for on-device ASR (spec section 4) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <application
         android:label="tasmee3_trainer"
         android:name="${applicationName}"
