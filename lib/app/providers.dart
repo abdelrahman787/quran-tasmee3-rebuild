@@ -115,11 +115,9 @@ final recitationScopeProvider = Provider<List<ExpectedWord>>((ref) {
   return QuranData.buildScope(surah);
 });
 
-/// Available surahs that have embedded text for the demo.
+/// All 114 surahs are now available (Phase 6: full Quran text loaded from JSON).
 final availableSurahsProvider = Provider<List<SurahMeta>>((ref) {
-  // Return surahs that have embedded text
-  final available = <int>{1, 103, 108, 109, 110, 111, 112, 113, 114};
-  return QuranData.surahs.where((s) => available.contains(s.number)).toList();
+  return QuranData.surahs.toList();
 });
 
 /// Debug logger — for kDebugMode only.

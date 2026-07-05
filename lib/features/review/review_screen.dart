@@ -29,6 +29,7 @@ class ReviewScreen extends ConsumerStatefulWidget {
 class _ReviewScreenState extends ConsumerState<ReviewScreen> {
   ReviewPlan? _autoPlan;
   bool _isLoading = true;
+  String? _error;
 
   @override
   void initState() {
@@ -49,6 +50,10 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     );
 
     try {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
       final plan = await service.rebuildAutoPlan(nowMs: clock());
       if (mounted) {
         setState(() {
@@ -58,7 +63,10 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _isLoading = false);
+        setState(() {
+          _error = e.toString();
+          _isLoading = false;
+        });
       }
     }
   }
@@ -78,9 +86,43 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : _autoPlan == null
-              ? _buildEmptyState()
-              : _buildPlanContent(),
+          : _error != null
+              ? _buildErrorState()
+              : _autoPlan == null
+                  ? _buildEmptyState()
+                  : _buildPlanContent(),
+    );
+  }
+
+  Widget _buildErrorState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.error_outline, size: 64, color: Colors.red[300]),
+            const SizedBox(height: 16),
+            const Text(
+              'حدث خطأ أثناء تحميل خطة المراجعة',
+              style: TextStyle(fontSize: 18),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _error!,
+              style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _loadPlan,
+              icon: const Icon(Icons.refresh),
+              label: const Text('إعادة المحاولة'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

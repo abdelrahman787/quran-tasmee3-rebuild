@@ -1,11 +1,14 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:tasmee3_trainer/main.dart';
+import 'package:tasmee3_trainer/models/quran_data.dart';
 
 void main() {
   testWidgets('App renders home screen with bottom navigation', (WidgetTester tester) async {
+    // Phase 6: QuranData must be loaded before the app can render surahs.
+    await QuranData.load();
+
     await tester.pumpWidget(
       const ProviderScope(
         child: Tasmee3App(),

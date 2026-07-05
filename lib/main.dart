@@ -20,6 +20,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'app/app_theme.dart';
 import 'app/providers.dart';
 import 'features/home/home_screen.dart';
+import 'models/quran_data.dart';
 import 'services/persistence/hive_repositories.dart';
 import 'services/persistence/prefs_settings_repository.dart';
 
@@ -33,6 +34,9 @@ void main() async {
   final planRepo = await HivePlanRepository.open();
   final reviewHistoryRepo = await HiveReviewHistoryRepository.open();
   final settingsRepo = SharedPreferencesSettingsRepository();
+
+  // ── Phase 6: load full Quran Uthmani text (6236 ayahs from JSON) ─────────
+  await QuranData.load();
 
   runApp(
     ProviderScope(
@@ -58,6 +62,14 @@ class Tasmee3App extends StatelessWidget {
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
       themeMode: ThemeMode.system,
+      // Force RTL for the Arabic-first UI.
+      locale: const Locale('ar'),
+      builder: (context, child) {
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: child!,
+        );
+      },
       home: const HomeScreen(),
     );
   }

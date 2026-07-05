@@ -102,24 +102,29 @@ class AppTheme {
         fontSize: 28,
         fontWeight: FontWeight.bold,
         color: inkDark,
+        fontFamily: 'Amiri',
       ),
       headlineMedium: TextStyle(
         fontSize: 22,
         fontWeight: FontWeight.w600,
         color: inkDark,
+        fontFamily: 'Amiri',
       ),
       bodyLarge: TextStyle(
         fontSize: 16,
         color: inkMedium,
+        fontFamily: 'Amiri',
       ),
       bodyMedium: TextStyle(
         fontSize: 14,
         color: inkMedium,
+        fontFamily: 'Amiri',
       ),
       labelLarge: TextStyle(
         fontSize: 16,
         fontWeight: FontWeight.w600,
         color: inkDark,
+        fontFamily: 'Amiri',
       ),
     ),
   );
@@ -147,6 +152,44 @@ class AppTheme {
       unselectedItemColor: Color(0xFF666688),
       type: BottomNavigationBarType.fixed,
       elevation: 8,
+    ),
+    cardTheme: CardThemeData(
+      color: const Color(0xFF252535),
+      elevation: 1,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: goldLight.withValues(alpha: 0.2), width: 1),
+      ),
+    ),
+    textTheme: const TextTheme(
+      headlineLarge: TextStyle(
+        fontSize: 28,
+        fontWeight: FontWeight.bold,
+        color: Colors.white,
+        fontFamily: 'Amiri',
+      ),
+      headlineMedium: TextStyle(
+        fontSize: 22,
+        fontWeight: FontWeight.w600,
+        color: Colors.white,
+        fontFamily: 'Amiri',
+      ),
+      bodyLarge: TextStyle(
+        fontSize: 16,
+        color: Color(0xFFCCCCCC),
+        fontFamily: 'Amiri',
+      ),
+      bodyMedium: TextStyle(
+        fontSize: 14,
+        color: Color(0xFFCCCCCC),
+        fontFamily: 'Amiri',
+      ),
+      labelLarge: TextStyle(
+        fontSize: 16,
+        fontWeight: FontWeight.w600,
+        color: Colors.white,
+        fontFamily: 'Amiri',
+      ),
     ),
   );
 }

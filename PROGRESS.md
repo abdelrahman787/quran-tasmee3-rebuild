@@ -472,5 +472,5 @@ Gate 0 is complete (pure-Dart pipeline compiles & unit-tests on Dart VM). Remain
 - [ ] Phase 4: ASR Gate 2 — model accuracy validation (requires physical Android device)
 - [x] Phase 5: Persistent storage (Hive repositories + SharedPreferences settings)
 - [x] Phase 5: Write persistence tests (12 tests, all passing)
-- [ ] Phase 6: Full Quran data (all 114 surahs)
-- [ ] Phase 7: Polish & production readiness
+- [x] Phase 6: Full Quran data (all 114 surahs, 6236 ayahs from JSON asset)
+- [x] Phase 7: Polish & production readiness (Amiri font, haptics, data backup, RTL, error states)

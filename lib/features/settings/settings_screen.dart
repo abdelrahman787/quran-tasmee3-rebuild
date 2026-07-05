@@ -6,12 +6,17 @@
 ///  - Weakness threshold
 ///  - Mastery horizon (days)
 ///  - Merge contiguous ayat toggle
+///  - Data backup (export/import review data)
 ///  - About / version info
 library;
 
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:quran_tasmee3_core/recitation/recitation_config.dart';
+import 'package:quran_tasmee3_core/review/models.dart';
 import 'package:quran_tasmee3_core/review/settings.dart';
 
 import '../../app/app_theme.dart';
@@ -27,6 +32,8 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   UserSettings? _settings;
   bool _isLoading = true;
+  bool _isExporting = false;
+  bool _isImporting = false;
 
   @override
   void initState() {
@@ -49,6 +56,219 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final repo = ref.read(settingsRepoProvider);
     await repo.save(settings);
     setState(() => _settings = settings);
+  }
+
+  Future<void> _exportData() async {
+    setState(() => _isExporting = true);
+    try {
+      final weakItemRepo = ref.read(weakItemRepoProvider);
+      final planRepo = ref.read(planRepoProvider);
+      final historyRepo = ref.read(reviewHistoryRepoProvider);
+
+      // Get the underlying Hive boxes.
+      final weakItems = await weakItemRepo.getAll();
+      final plans = await planRepo.getAll();
+      final history = await historyRepo.getAll();
+
+      // Build export JSON directly from the repository data.
+      final export = <String, dynamic>{
+        'version': 1,
+        'exportedAt': DateTime.now().millisecondsSinceEpoch,
+        'weakItems': weakItems.map((item) => {
+              'wordId': item.wordId,
+              'surah': item.surah,
+              'ayah': item.ayah,
+              'wordIndex': item.wordIndex,
+              'errorCount': item.errorCount,
+              'lastErrorAt': item.lastErrorAt,
+              'masteryScore': item.masteryScore,
+              'forgetCount': item.forgetCount,
+            }).toList(),
+        'plans': plans.map((plan) => {
+              'id': plan.id,
+              'name': plan.name,
+              'dailyTarget': plan.dailyTarget,
+              'createdAt': plan.createdAt,
+              'updatedAt': plan.updatedAt,
+              'items': plan.items.map((item) => {
+                    'id': item.id,
+                    'surah': item.surah,
+                    'ayah': item.ayah,
+                    'ayahEnd': item.ayahEnd,
+                    'ease': item.ease,
+                    'intervalDays': item.intervalDays,
+                    'repetitions': item.repetitions,
+                    'dueAt': item.dueAt,
+                    'lastScore': item.lastScore,
+                    'status': item.status.wire,
+                  }).toList(),
+            }).toList(),
+        'reviewHistory': history.map((r) => {
+              'planItemId': r.planItemId,
+              'score': r.score,
+              'confirmedErrors': r.confirmedErrors,
+              'totalWords': r.totalWords,
+              'reviewedAt': r.reviewedAt,
+            }).toList(),
+      };
+
+      final jsonString = const JsonEncoder.withIndent('  ').convert(export);
+
+      // Copy to clipboard for the user to paste anywhere.
+      await Clipboard.setData(ClipboardData(text: jsonString));
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'تم تصدير البيانات (${weakItems.length} عنصر، '
+              '${plans.length} خطة، ${history.length} نتيجة).\n'
+              'تم نسخها إلى الحافظة.',
+            ),
+            backgroundColor: AppTheme.primaryGreen,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('خطأ في التصدير: $e'),
+            backgroundColor: AppTheme.wordError,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  Future<void> _importData() async {
+    // Show a dialog to paste JSON data.
+    final controller = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('استيراد البيانات'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'الصق بيانات النسخة الاحتياطية هنا:',
+              style: TextStyle(fontSize: 14),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              maxLines: 8,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: '{"version":1,...}',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('إلغاء'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('استيراد'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == null || result.trim().isEmpty) return;
+
+    setState(() => _isImporting = true);
+    try {
+      final weakItemRepo = ref.read(weakItemRepoProvider);
+      final planRepo = ref.read(planRepoProvider);
+
+      // Parse and validate JSON.
+      final data = json.decode(result) as Map<String, dynamic>;
+
+      // Clear and re-import via repositories.
+      await weakItemRepo.clear();
+
+      final weakItems = data['weakItems'] as List? ?? [];
+      for (final entry in weakItems) {
+        final m = entry as Map<String, dynamic>;
+        await weakItemRepo.upsert(WeakItem(
+          wordId: m['wordId'] as String,
+          surah: m['surah'] as int,
+          ayah: m['ayah'] as int,
+          wordIndex: m['wordIndex'] as int,
+          errorCount: m['errorCount'] as int,
+          lastErrorAt: m['lastErrorAt'] as int,
+          masteryScore: (m['masteryScore'] as num).toDouble(),
+          forgetCount: m['forgetCount'] as int? ?? 0,
+        ));
+      }
+
+      // For plans, we need to delete old ones and save new.
+      final existingPlans = await planRepo.getAll();
+      for (final p in existingPlans) {
+        await planRepo.delete(p.id);
+      }
+      final plans = data['plans'] as List? ?? [];
+      for (final entry in plans) {
+        final m = entry as Map<String, dynamic>;
+        final items = (m['items'] as List? ?? []).map((e) {
+          final im = e as Map<String, dynamic>;
+          return PlanItem(
+            id: im['id'] as String,
+            surah: im['surah'] as int,
+            ayah: im['ayah'] as int,
+            ayahEnd: im['ayahEnd'] as int?,
+            ease: (im['ease'] as num).toDouble(),
+            intervalDays: im['intervalDays'] as int,
+            repetitions: im['repetitions'] as int,
+            dueAt: im['dueAt'] as int,
+            lastScore: im['lastScore'] != null
+                ? (im['lastScore'] as num).toDouble()
+                : null,
+            status: PlanItemStatusWire.fromWire(im['status'] as String),
+          );
+        }).toList();
+        await planRepo.save(ReviewPlan(
+          id: m['id'] as String,
+          name: m['name'] as String,
+          items: items,
+          dailyTarget: m['dailyTarget'] as int,
+          createdAt: m['createdAt'] as int,
+          updatedAt: m['updatedAt'] as int,
+        ));
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'تم استيراد البيانات بنجاح.\n'
+              '(${weakItems.length} عنصر، ${plans.length} خطة)',
+            ),
+            backgroundColor: AppTheme.primaryGreen,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('خطأ في الاستيراد: $e'),
+            backgroundColor: AppTheme.wordError,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isImporting = false);
+    }
   }
 
   @override
@@ -75,6 +295,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   _ReviewSettingsSection(
                     settings: _settings!,
                     onChanged: _saveSettings,
+                  ),
+                  const SizedBox(height: 16),
+                  _DataBackupSection(
+                    isExporting: _isExporting,
+                    isImporting: _isImporting,
+                    onExport: _exportData,
+                    onImport: _importData,
                   ),
                   const SizedBox(height: 16),
                   _AboutSection(),
@@ -256,6 +483,89 @@ class _ReviewSettingsSection extends StatelessWidget {
   }
 }
 
+class _DataBackupSection extends StatelessWidget {
+  final bool isExporting;
+  final bool isImporting;
+  final VoidCallback onExport;
+  final VoidCallback onImport;
+
+  const _DataBackupSection({
+    required this.isExporting,
+    required this.isImporting,
+    required this.onExport,
+    required this.onImport,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.backup, color: AppTheme.primaryGreen, size: 22),
+                SizedBox(width: 8),
+                Text(
+                  'النسخ الاحتياطي للبيانات',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.inkDark,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'تصدير بيانات المراجعة والخطط إلى الحافظة، '
+              'أو استيرادها من نسخة احتياطية سابقة.',
+              style: TextStyle(
+                fontSize: 13,
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: isExporting ? null : onExport,
+                    icon: isExporting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.file_download),
+                    label: const Text('تصدير'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: isImporting ? null : onImport,
+                    icon: isImporting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.file_upload),
+                    label: const Text('استيراد'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _AboutSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
@@ -275,7 +585,7 @@ class _AboutSection extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             const Text(
-              'تسميع - تطبيق اختبار حفظ القرآن الكين',
+              'تسميع - تطبيق اختبار حفظ القرآن الكريم',
               style: TextStyle(fontSize: 15),
             ),
             const SizedBox(height: 8),

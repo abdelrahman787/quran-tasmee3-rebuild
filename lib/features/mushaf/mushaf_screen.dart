@@ -1,9 +1,10 @@
-/// Mushaf screen — browse surahs, view ayah text, and select a surah
-/// to start a recitation session.
+/// Mushaf screen — browse all 114 surahs, view ayah text, and select a
+/// surah to start a recitation session.
 ///
-/// In production, this would use QCF V2 per-page fonts with the full
-/// Uthmani text. For the web preview, we use system Arabic fonts with
-/// embedded text for a subset of surahs.
+/// Phase 6: Full Quran Uthmani text is loaded from the JSON asset. Surah
+/// cards lazy-load ayah text on expand. Long surahs (e.g. Al-Baqarah with
+/// 286 ayahs) use paginated display to avoid rendering all tiles at once.
+/// A search bar lets users quickly find any surah by name or number.
 library;
 
 import 'package:flutter/material.dart';
@@ -23,10 +24,21 @@ class MushafScreen extends ConsumerStatefulWidget {
 class _MushafScreenState extends ConsumerState<MushafScreen> {
   int? _selectedSurah;
   int? _expandedAyah;
+  String _searchQuery = '';
 
   @override
   Widget build(BuildContext context) {
     final availableSurahs = ref.watch(availableSurahsProvider);
+
+    // Filter surahs based on search query
+    final filteredSurahs = _searchQuery.isEmpty
+        ? availableSurahs
+        : availableSurahs.where((s) {
+            final q = _searchQuery.toLowerCase();
+            return s.name.contains(_searchQuery) ||
+                s.englishName.toLowerCase().contains(q) ||
+                s.number.toString() == _searchQuery;
+          }).toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -37,37 +49,90 @@ class _MushafScreenState extends ConsumerState<MushafScreen> {
             onPressed: () => _showInfoDialog(context),
           ),
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(56),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: TextField(
+              onChanged: (value) => setState(() => _searchQuery = value),
+              decoration: InputDecoration(
+                hintText: 'ابحث عن سورة بالاسم أو الرقم...',
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: _searchQuery.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear, size: 20),
+                        onPressed: () => setState(() => _searchQuery = ''),
+                      )
+                    : null,
+                isDense: true,
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.grey.shade300),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: AppTheme.primaryGreen),
+                ),
+                filled: true,
+                fillColor: Theme.of(context).brightness == Brightness.dark
+                    ? Colors.grey.shade800
+                    : Colors.grey.shade50,
+              ),
+            ),
+          ),
+        ),
       ),
       body: availableSurahs.isEmpty
           ? const Center(child: CircularProgressIndicator())
-          : ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: availableSurahs.length,
-              itemBuilder: (context, index) {
-                final surah = availableSurahs[index];
-                return _SurahCard(
-                  surah: surah,
-                  isExpanded: _selectedSurah == surah.number,
-                  expandedAyah: _expandedAyah,
-                  onToggle: () {
-                    setState(() {
-                      _selectedSurah = _selectedSurah == surah.number
-                          ? null
-                          : surah.number;
-                      _expandedAyah = null;
-                    });
+          : filteredSurahs.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.search_off, size: 48, color: Colors.grey[400]),
+                      const SizedBox(height: 12),
+                      Text(
+                        'لا توجد نتائج',
+                        style: TextStyle(
+                            fontSize: 16, color: Colors.grey[600]),
+                      ),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: filteredSurahs.length,
+                  itemBuilder: (context, index) {
+                    final surah = filteredSurahs[index];
+                    return _SurahCard(
+                      surah: surah,
+                      isExpanded: _selectedSurah == surah.number,
+                      expandedAyah: _expandedAyah,
+                      onToggle: () {
+                        setState(() {
+                          _selectedSurah = _selectedSurah == surah.number
+                              ? null
+                              : surah.number;
+                          _expandedAyah = null;
+                        });
+                      },
+                      onAyahTap: (ayahNum) {
+                        setState(() {
+                          _expandedAyah = _expandedAyah == ayahNum
+                              ? null
+                              : ayahNum;
+                        });
+                      },
+                      onStartRecitation: () => _startRecitation(surah),
+                    );
                   },
-                  onAyahTap: (ayahNum) {
-                    setState(() {
-                      _expandedAyah = _expandedAyah == ayahNum
-                          ? null
-                          : ayahNum;
-                    });
-                  },
-                  onStartRecitation: () => _startRecitation(surah),
-                );
-              },
-            ),
+                ),
     );
   }
 
@@ -94,7 +159,7 @@ class _MushafScreenState extends ConsumerState<MushafScreen> {
           'تطبيق تسميع القرآن الكريم\n\n'
           'يستخدم التطبيق تقنية التعرف على الكلام على الجهاز '
           'لمتابعة تلاوتك كلمة بكلمة وتنبيهك للأخطاء.\n\n'
-          'يعمل التطبيق بدون انترنت.',
+          'يعمل التطبيق بدون انترنت. يحتوي على نص المصحف كاملاً (114 سورة).',
           textAlign: TextAlign.right,
         ),
         actions: [
@@ -108,7 +173,7 @@ class _MushafScreenState extends ConsumerState<MushafScreen> {
   }
 }
 
-class _SurahCard extends StatelessWidget {
+class _SurahCard extends StatefulWidget {
   final SurahMeta surah;
   final bool isExpanded;
   final int? expandedAyah;
@@ -126,15 +191,45 @@ class _SurahCard extends StatelessWidget {
   });
 
   @override
+  State<_SurahCard> createState() => _SurahCardState();
+}
+
+class _SurahCardState extends State<_SurahCard> {
+  /// Paginated ayah display: show first 20 ayahs, load more on scroll.
+  static const int _pageSize = 20;
+  int _visibleCount = _pageSize;
+  List<AyahData>? _cachedAyat;
+
+  @override
+  void didUpdateWidget(_SurahCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Reset pagination when surah changes or card collapses
+    if (oldWidget.surah.number != widget.surah.number ||
+        (oldWidget.isExpanded && !widget.isExpanded)) {
+      _visibleCount = _pageSize;
+      _cachedAyat = null;
+    }
+  }
+
+  List<AyahData> _getAyat() {
+    if (_cachedAyat == null) {
+      _cachedAyat = QuranData.getAyatForSurah(widget.surah.number);
+    }
+    return _cachedAyat!;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final ayat = QuranData.getAyatForSurah(surah.number);
+    final ayat = widget.isExpanded ? _getAyat() : <AyahData>[];
+    final visibleAyat = ayat.take(_visibleCount).toList();
+    final hasMore = ayat.length > _visibleCount;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: Column(
         children: [
           InkWell(
-            onTap: onToggle,
+            onTap: widget.onToggle,
             borderRadius: BorderRadius.circular(12),
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -153,7 +248,7 @@ class _SurahCard extends StatelessWidget {
                     ),
                     child: Center(
                       child: Text(
-                        '${surah.number}',
+                        '${widget.surah.number}',
                         style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
@@ -169,7 +264,7 @@ class _SurahCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          surah.name,
+                          widget.surah.name,
                           style: const TextStyle(
                             fontSize: 22,
                             fontWeight: FontWeight.w600,
@@ -179,7 +274,7 @@ class _SurahCard extends StatelessWidget {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          '${surah.englishName} • ${surah.ayahCount} آية • ${surah.revelationType == 'Meccan' ? 'مكية' : 'مدنية'}',
+                          '${widget.surah.englishName} • ${widget.surah.ayahCount} آية • ${widget.surah.revelationType == 'Meccan' ? 'مكية' : 'مدنية'}',
                           style: TextStyle(
                             fontSize: 13,
                             color: Colors.grey[600],
@@ -190,19 +285,19 @@ class _SurahCard extends StatelessWidget {
                   ),
                   // Expand icon
                   Icon(
-                    isExpanded ? Icons.expand_less : Icons.expand_more,
+                    widget.isExpanded ? Icons.expand_less : Icons.expand_more,
                     color: AppTheme.primaryGreen,
                   ),
                 ],
               ),
             ),
           ),
-          if (isExpanded) ...[
+          if (widget.isExpanded) ...[
             const Divider(height: 1),
             if (ayat.isEmpty)
               const Padding(
                 padding: EdgeInsets.all(24),
-                child: Text('لا يوجد نص متاح لهذه السورة في العرض التجريبي'),
+                child: Center(child: CircularProgressIndicator()),
               )
             else
               Padding(
@@ -210,21 +305,38 @@ class _SurahCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Ayah list
-                    for (final ayah in ayat) ...[
+                    // Ayah list (paginated)
+                    for (final ayah in visibleAyat) ...[
                       _AyahTile(
                         ayah: ayah,
-                        isExpanded: expandedAyah == ayah.ayah,
-                        onTap: () => onAyahTap(ayah.ayah),
+                        isExpanded: widget.expandedAyah == ayah.ayah,
+                        onTap: () => widget.onAyahTap(ayah.ayah),
                       ),
-                      if (ayah != ayat.last) const SizedBox(height: 8),
+                      if (ayah != visibleAyat.last) const SizedBox(height: 8),
+                    ],
+                    // Load more button
+                    if (hasMore) ...[
+                      const SizedBox(height: 12),
+                      Center(
+                        child: TextButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _visibleCount += _pageSize;
+                            });
+                          },
+                          icon: const Icon(Icons.expand_more),
+                          label: Text(
+                            'عرض المزيد (${ayat.length - _visibleCount} آية متبقية)',
+                          ),
+                        ),
+                      ),
                     ],
                     const SizedBox(height: 16),
                     // Start recitation button
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton.icon(
-                        onPressed: onStartRecitation,
+                        onPressed: widget.onStartRecitation,
                         icon: const Icon(Icons.mic),
                         label: const Text('بدء التسميع'),
                       ),

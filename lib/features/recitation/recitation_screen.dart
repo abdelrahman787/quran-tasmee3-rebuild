@@ -18,9 +18,9 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:quran_tasmee3_core/recitation/recitation_controller.dart';
-import 'package:quran_tasmee3_core/recitation/session_report.dart';
 
 import '../../app/app_theme.dart';
 import '../../app/providers.dart';
@@ -38,12 +38,16 @@ class RecitationScreen extends ConsumerStatefulWidget {
 
 class _RecitationScreenState extends ConsumerState<RecitationScreen> {
   bool _sessionActive = false;
+  /// Previous error wordId — used to detect new errors for haptic feedback.
+  String? _lastErrorWordId;
 
   @override
   Widget build(BuildContext context) {
+    // Watch session state once; used for both haptic feedback and UI.
+    final sessionState = ref.watch(sessionStoreProvider);
+    _maybeTriggerHaptic(sessionState);
     final surahNum = ref.watch(selectedSurahProvider);
     final surah = QuranData.getSurah(surahNum);
-    final sessionState = ref.watch(sessionStoreProvider);
     final scope = ref.watch(recitationScopeProvider);
 
     return Scaffold(
@@ -58,9 +62,11 @@ class _RecitationScreenState extends ConsumerState<RecitationScreen> {
             ),
         ],
       ),
-      body: scope.isEmpty
-          ? _buildEmptyState()
-          : _buildRecitationBody(context, surah, scope, sessionState),
+      body: !QuranData.isLoaded
+          ? _buildLoadingState()
+          : scope.isEmpty
+              ? _buildEmptyState()
+              : _buildRecitationBody(context, surah, scope, sessionState),
       floatingActionButton: _sessionActive
           ? null
           : FloatingActionButton.extended(
@@ -69,6 +75,22 @@ class _RecitationScreenState extends ConsumerState<RecitationScreen> {
               label: const Text('بدء التسميع'),
               backgroundColor: AppTheme.primaryGreen,
             ),
+    );
+  }
+
+  Widget _buildLoadingState() {
+    return const Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircularProgressIndicator(),
+          SizedBox(height: 16),
+          Text(
+            'جاري تحميل نص المصحف...',
+            style: TextStyle(fontSize: 16, color: Colors.grey),
+          ),
+        ],
+      ),
     );
   }
 
@@ -355,6 +377,30 @@ class _RecitationScreenState extends ConsumerState<RecitationScreen> {
     );
   }
 
+  /// Trigger haptic feedback when a new non-transient error is detected.
+  void _maybeTriggerHaptic(SessionState state) {
+    final err = state.lastError;
+    if (err != null && err.wordId != _lastErrorWordId) {
+      _lastErrorWordId = err.wordId;
+      // Only vibrate for non-transient errors (soft, flag, confirmed).
+      if (err.severity != ErrorSeverity.transient) {
+        if (err.severity == ErrorSeverity.soft) {
+          // Light feedback for soft errors (attempt 2).
+          HapticFeedback.lightImpact();
+        } else if (err.severity == ErrorSeverity.flag) {
+          // Medium feedback for pronunciation flags.
+          HapticFeedback.mediumImpact();
+        } else {
+          // Heavy feedback for confirmed errors.
+          HapticFeedback.heavyImpact();
+        }
+      }
+    } else if (err == null && _lastErrorWordId != null) {
+      // Error cleared — reset tracker.
+      _lastErrorWordId = null;
+    }
+  }
+
   void _startSession(List scope) {
     final config = ref.read(recitationConfigProvider);
     final asrService = ref.read(asrServiceProvider);
@@ -365,6 +411,8 @@ class _RecitationScreenState extends ConsumerState<RecitationScreen> {
     if (asrService is FakeAsrServiceImpl) {
       asrService.setScope(scope.cast());
     }
+
+    _lastErrorWordId = null; // Reset error tracker for new session.
 
     ref.read(sessionStoreProvider.notifier).startSession(
       scope: scope.cast(),
@@ -380,6 +428,7 @@ class _RecitationScreenState extends ConsumerState<RecitationScreen> {
   void _endSession() {
     final report = ref.read(sessionStoreProvider.notifier).stopAndReport();
     setState(() => _sessionActive = false);
+    _lastErrorWordId = null; // Reset error tracker.
 
     if (report != null) {
       Navigator.push(

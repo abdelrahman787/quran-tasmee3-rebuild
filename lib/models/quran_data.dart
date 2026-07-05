@@ -1,11 +1,14 @@
-/// Static Quran metadata: surah names, ayah counts, and a small set of
-/// embedded ayah text for demo/preview purposes.
+/// Complete Quran metadata and Uthmani ayah text for all 114 surahs.
 ///
-/// In production this would be backed by a full Quran database (QCF V2
-/// per-page fonts + Uthmani text). For the web preview and testing, we
-/// embed enough text to demonstrate the recitation and mushaf features.
+/// Surah metadata (names, ayah counts, revelation type) is compiled in as
+/// a const list. The full 6236-ayah Uthmani text is loaded at runtime from
+/// `assets/quran/quran_uthmani.json` — a compact JSON file (~1.4 MB)
+/// produced from the AlQuran Cloud API.
 library;
 
+import 'dart:convert';
+
+import 'package:flutter/services.dart';
 import 'package:quran_tasmee3_core/recitation/matching_engine.dart';
 import 'package:quran_tasmee3_core/recitation/normalizer.dart';
 
@@ -180,70 +183,39 @@ class QuranData {
     SurahMeta(number: 114, name: 'الناس', englishName: 'An-Nas', englishTranslation: 'Mankind', ayahCount: 6, revelationType: 'Meccan'),
   ];
 
-  /// Embedded ayah text for demo/preview. In production, this would come
-  /// from a full Uthmani text database. We embed Al-Fatihah and the last
-  /// few short surahs which are commonly memorized.
-  static const Map<String, AyahData> _ayahTexts = {
-    // Surah Al-Fatihah (1)
-    '1:1': AyahData(surah: 1, ayah: 1, page: 1, uthmaniText: 'بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ'),
-    '1:2': AyahData(surah: 1, ayah: 2, page: 1, uthmaniText: 'ٱلْحَمْدُ لِلَّهِ رَبِّ ٱلْعَٰلَمِينَ'),
-    '1:3': AyahData(surah: 1, ayah: 3, page: 1, uthmaniText: 'ٱلرَّحْمَٰنِ ٱلرَّحِيمِ'),
-    '1:4': AyahData(surah: 1, ayah: 4, page: 1, uthmaniText: 'مَٰلِكِ يَوْمِ ٱلدِّينِ'),
-    '1:5': AyahData(surah: 1, ayah: 5, page: 1, uthmaniText: 'إِيَّاكَ نَعْبُدُ وَإِيَّاكَ نَسْتَعِينُ'),
-    '1:6': AyahData(surah: 1, ayah: 6, page: 1, uthmaniText: 'ٱهْدِنَا ٱلصِّرَٰطَ ٱلْمُسْتَقِيمَ'),
-    '1:7': AyahData(surah: 1, ayah: 7, page: 1, uthmaniText: 'صِرَٰطَ ٱلَّذِينَ أَنْعَمْتَ عَلَيْهِمْ غَيْرِ ٱلْمَغْضُوبِ عَلَيْهِمْ وَلَا ٱلضَّآلِّينَ'),
+  /// In-memory ayah text map, populated by [load()] from the JSON asset.
+  /// Keyed by `"surah:ayah"` (e.g. `"1:1"`).
+  static final Map<String, AyahData> _ayahTexts = {};
 
-    // Surah Al-Ikhlas (112)
-    '112:1': AyahData(surah: 112, ayah: 1, page: 604, uthmaniText: 'قُلْ هُوَ ٱللَّهُ أَحَدٌ'),
-    '112:2': AyahData(surah: 112, ayah: 2, page: 604, uthmaniText: 'ٱللَّهُ ٱلصَّمَدُ'),
-    '112:3': AyahData(surah: 112, ayah: 3, page: 604, uthmaniText: 'لَمْ يَلِدْ وَلَمْ يُولَدْ'),
-    '112:4': AyahData(surah: 112, ayah: 4, page: 604, uthmaniText: 'وَلَمْ يَكُن لَّهُۥ كُفُوًا أَحَدٌ'),
+  /// Whether the full Quran text has been loaded from the JSON asset.
+  static bool _isLoaded = false;
 
-    // Surah Al-Falaq (113)
-    '113:1': AyahData(surah: 113, ayah: 1, page: 604, uthmaniText: 'قُلْ أَعُوذُ بِرَبِّ ٱلْفَلَقِ'),
-    '113:2': AyahData(surah: 113, ayah: 2, page: 604, uthmaniText: 'مِن شَرِّ مَا خَلَقَ'),
-    '113:3': AyahData(surah: 113, ayah: 3, page: 604, uthmaniText: 'وَمِن شَرِّ غَاسِقٍ إِذَا وَقَبَ'),
-    '113:4': AyahData(surah: 113, ayah: 4, page: 604, uthmaniText: 'وَمِن شَرِّ ٱلنَّفَّٰثَٰتِ فِى ٱلْعُقَدِ'),
-    '113:5': AyahData(surah: 113, ayah: 5, page: 604, uthmaniText: 'وَمِن شَرِّ حَاسِدٍ إِذَا حَسَدَ'),
+  /// Load all 6236 ayahs from `assets/quran/quran_uthmani.json`.
+  /// Must be called once at startup (before any screen that needs ayah text).
+  /// Subsequent calls are no-ops.
+  static Future<void> load() async {
+    if (_isLoaded) return;
+    final jsonStr = await rootBundle.loadString('assets/quran/quran_uthmani.json');
+    final data = json.decode(jsonStr) as Map<String, dynamic>;
+    data.forEach((surahStr, ayahsMap) {
+      final surah = int.parse(surahStr);
+      final ayahs = ayahsMap as Map<String, dynamic>;
+      ayahs.forEach((ayahStr, fields) {
+        final ayah = int.parse(ayahStr);
+        final f = fields as Map<String, dynamic>;
+        _ayahTexts['$surah:$ayah'] = AyahData(
+          surah: surah,
+          ayah: ayah,
+          uthmaniText: f['t'] as String,
+          page: f['p'] as int,
+        );
+      });
+    });
+    _isLoaded = true;
+  }
 
-    // Surah An-Nas (114)
-    '114:1': AyahData(surah: 114, ayah: 1, page: 604, uthmaniText: 'قُلْ أَعُوذُ بِرَبِّ ٱلنَّاسِ'),
-    '114:2': AyahData(surah: 114, ayah: 2, page: 604, uthmaniText: 'مَلِكِ ٱلنَّاسِ'),
-    '114:3': AyahData(surah: 114, ayah: 3, page: 604, uthmaniText: 'إِلَٰهِ ٱلنَّاسِ'),
-    '114:4': AyahData(surah: 114, ayah: 4, page: 604, uthmaniText: 'مِن شَرِّ ٱلْوَسْوَاسِ ٱلْخَنَّاسِ'),
-    '114:5': AyahData(surah: 114, ayah: 5, page: 604, uthmaniText: 'ٱلَّذِى يُوَسْوِسُ فِى صُدُورِ ٱلنَّاسِ'),
-    '114:6': AyahData(surah: 114, ayah: 6, page: 604, uthmaniText: 'مِنَ ٱلْجِنَّةِ وَٱلنَّاسِ'),
-
-    // Surah Al-Asr (103)
-    '103:1': AyahData(surah: 103, ayah: 1, page: 601, uthmaniText: 'وَٱلْعَصْرِ'),
-    '103:2': AyahData(surah: 103, ayah: 2, page: 601, uthmaniText: 'إِنَّ ٱلْإِنسَٰنَ لَفِى خُسْرٍ'),
-    '103:3': AyahData(surah: 103, ayah: 3, page: 601, uthmaniText: 'إِلَّا ٱلَّذِينَ ءَامَنُوا۟ وَعَمِلُوا۟ ٱلصَّٰلِحَٰتِ وَتَوَاصَوْا۟ بِٱلْحَقِّ وَتَوَاصَوْا۟ بِٱلصَّبْرِ'),
-
-    // Surah Al-Kawthar (108)
-    '108:1': AyahData(surah: 108, ayah: 1, page: 602, uthmaniText: 'إِنَّآ أَعْطَيْنَٰكَ ٱلْكَوْثَرَ'),
-    '108:2': AyahData(surah: 108, ayah: 2, page: 602, uthmaniText: 'فَصَلِّ لِرَبِّكَ وَٱنْحَرْ'),
-    '108:3': AyahData(surah: 108, ayah: 3, page: 602, uthmaniText: 'إِنَّ شَانِئَكَ هُوَ ٱلْأَبْتَرُ'),
-
-    // Surah Al-Masad (111)
-    '111:1': AyahData(surah: 111, ayah: 1, page: 603, uthmaniText: 'تَبَّتْ يَدَآ أَبِى لَهَبٍ وَتَبَّ'),
-    '111:2': AyahData(surah: 111, ayah: 2, page: 603, uthmaniText: 'مَآ أَغْنَىٰ عَنْهُ مَالُهُۥ وَمَا كَسَبَ'),
-    '111:3': AyahData(surah: 111, ayah: 3, page: 603, uthmaniText: 'سَيَصْلَىٰ نَارًا ذَاتَ لَهَبٍ'),
-    '111:4': AyahData(surah: 111, ayah: 4, page: 603, uthmaniText: 'وَٱمْرَأَتُهُۥ حَمَّالَةَ ٱلْحَطَبِ'),
-    '111:5': AyahData(surah: 111, ayah: 5, page: 603, uthmaniText: 'فِى جِيدِهَا حَبْلٌ مِّن مَّسَدٍ'),
-
-    // Surah An-Nasr (110)
-    '110:1': AyahData(surah: 110, ayah: 1, page: 603, uthmaniText: 'إِذَا جَآءَ نَصْرُ ٱللَّهِ وَٱلْفَتْحُ'),
-    '110:2': AyahData(surah: 110, ayah: 2, page: 603, uthmaniText: 'وَرَأَيْتَ ٱلنَّاسَ يَدْخُلُونَ فِى دِينِ ٱللَّهِ أَفْوَاجًا'),
-    '110:3': AyahData(surah: 110, ayah: 3, page: 603, uthmaniText: 'فَسَبِّحْ بِحَمْدِ رَبِّكَ وَٱسْتَغْفِرْهُ ۚ إِنَّهُۥ كَانَ تَوَّابًا'),
-
-    // Surah Al-Kafirun (109)
-    '109:1': AyahData(surah: 109, ayah: 1, page: 603, uthmaniText: 'قُلْ يَٰٓأَيُّهَا ٱلْكَٰفِرُونَ'),
-    '109:2': AyahData(surah: 109, ayah: 2, page: 603, uthmaniText: 'لَآ أَعْبُدُ مَا تَعْبُدُونَ'),
-    '109:3': AyahData(surah: 109, ayah: 3, page: 603, uthmaniText: 'وَلَآ أَنتُمْ عَٰبِدُونَ مَآ أَعْبُدُ'),
-    '109:4': AyahData(surah: 109, ayah: 4, page: 603, uthmaniText: 'وَلَآ أَنَا۠ عَابِدٌ مَّا عَبَدتُّمْ'),
-    '109:5': AyahData(surah: 109, ayah: 5, page: 603, uthmaniText: 'وَلَآ أَنتُمْ عَٰبِدُونَ مَآ أَعْبُدُ'),
-    '109:6': AyahData(surah: 109, ayah: 6, page: 603, uthmaniText: 'لَكُمْ دِينُكُمْ وَلِىَ دِينِ'),
-  };
+  /// Whether the full Quran text has been loaded.
+  static bool get isLoaded => _isLoaded;
 
   /// Get surah metadata by number.
   static SurahMeta? getSurah(int number) {
@@ -256,7 +228,7 @@ class QuranData {
     return _ayahTexts['$surah:$ayah'];
   }
 
-  /// Get all ayat for a surah (from embedded data).
+  /// Get all ayat for a surah.
   static List<AyahData> getAyatForSurah(int surah) {
     final meta = getSurah(surah);
     if (meta == null) return [];

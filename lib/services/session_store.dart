@@ -7,7 +7,6 @@ library;
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:quran_tasmee3_core/recitation/asr_service.dart';
 import 'package:quran_tasmee3_core/recitation/matching_engine.dart';
