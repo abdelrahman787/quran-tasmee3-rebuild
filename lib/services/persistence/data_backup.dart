@@ -2,103 +2,111 @@
 ///
 /// Phase 7 — Production Polish.  Exports weak items, review plans, and review
 /// history to a single JSON string that can be shared or saved by the user.
-/// Import restores the data into the Hive boxes, replacing existing entries.
+/// Import restores the data via the repository interfaces, replacing existing
+/// weak items and plans, and appending review history.
+///
+/// This is the **single implementation** of export/import logic — the settings
+/// screen calls these functions rather than duplicating the serialization.
 library;
 
 import 'dart:convert';
 
-import 'package:hive/hive.dart';
 import 'package:quran_tasmee3_core/review/models.dart';
+import 'package:quran_tasmee3_core/review/repositories.dart';
 
 /// Serialise all review data to a JSON string.
 ///
 /// Returns a compact JSON string with keys: `version`, `exportedAt`,
 /// `weakItems`, `plans`, `reviewHistory`.
+///
+/// Reads data through the repository interfaces so it works with any
+/// backing store (Hive, in-memory, Firestore).
 Future<String> exportReviewData({
-  required Box<WeakItem> weakItemBox,
-  required Box<ReviewPlan> planBox,
-  required Box<ReviewResult> historyBox,
+  required WeakItemRepository weakItemRepo,
+  required PlanRepository planRepo,
+  required ReviewHistoryRepository historyRepo,
 }) async {
-  final weakItems = <Map<String, dynamic>>[];
-  for (final item in weakItemBox.values) {
-    weakItems.add({
-      'wordId': item.wordId,
-      'surah': item.surah,
-      'ayah': item.ayah,
-      'wordIndex': item.wordIndex,
-      'errorCount': item.errorCount,
-      'lastErrorAt': item.lastErrorAt,
-      'masteryScore': item.masteryScore,
-      'forgetCount': item.forgetCount,
-    });
-  }
+  final weakItems = await weakItemRepo.getAll();
+  final plans = await planRepo.getAll();
+  final history = await historyRepo.getAll();
 
-  final plans = <Map<String, dynamic>>[];
-  for (final plan in planBox.values) {
-    plans.add({
-      'id': plan.id,
-      'name': plan.name,
-      'dailyTarget': plan.dailyTarget,
-      'createdAt': plan.createdAt,
-      'updatedAt': plan.updatedAt,
-      'items': plan.items.map((item) => {
-            'id': item.id,
-            'surah': item.surah,
-            'ayah': item.ayah,
-            'ayahEnd': item.ayahEnd,
-            'ease': item.ease,
-            'intervalDays': item.intervalDays,
-            'repetitions': item.repetitions,
-            'dueAt': item.dueAt,
-            'lastScore': item.lastScore,
-            'status': item.status.wire,
-          }).toList(),
-    });
-  }
-
-  final history = <Map<String, dynamic>>[];
-  for (final result in historyBox.values) {
-    history.add({
-      'planItemId': result.planItemId,
-      'score': result.score,
-      'confirmedErrors': result.confirmedErrors,
-      'totalWords': result.totalWords,
-      'reviewedAt': result.reviewedAt,
-    });
-  }
-
-  final export = {
+  final export = <String, dynamic>{
     'version': 1,
     'exportedAt': DateTime.now().millisecondsSinceEpoch,
-    'weakItems': weakItems,
-    'plans': plans,
-    'reviewHistory': history,
+    'weakItems': weakItems
+        .map((item) => {
+              'wordId': item.wordId,
+              'surah': item.surah,
+              'ayah': item.ayah,
+              'wordIndex': item.wordIndex,
+              'errorCount': item.errorCount,
+              'lastErrorAt': item.lastErrorAt,
+              'masteryScore': item.masteryScore,
+              'forgetCount': item.forgetCount,
+            })
+        .toList(),
+    'plans': plans
+        .map((plan) => {
+              'id': plan.id,
+              'name': plan.name,
+              'dailyTarget': plan.dailyTarget,
+              'createdAt': plan.createdAt,
+              'updatedAt': plan.updatedAt,
+              'items': plan.items
+                  .map((item) => {
+                        'id': item.id,
+                        'surah': item.surah,
+                        'ayah': item.ayah,
+                        'ayahEnd': item.ayahEnd,
+                        'ease': item.ease,
+                        'intervalDays': item.intervalDays,
+                        'repetitions': item.repetitions,
+                        'dueAt': item.dueAt,
+                        'lastScore': item.lastScore,
+                        'status': item.status.wire,
+                      })
+                  .toList(),
+            })
+        .toList(),
+    'reviewHistory': history
+        .map((r) => {
+              'planItemId': r.planItemId,
+              'score': r.score,
+              'confirmedErrors': r.confirmedErrors,
+              'totalWords': r.totalWords,
+              'reviewedAt': r.reviewedAt,
+            })
+        .toList(),
   };
 
   return const JsonEncoder.withIndent('  ').convert(export);
 }
 
-/// Import review data from a JSON string, replacing all existing entries.
+/// Import review data from a JSON string, replacing existing entries.
+///
+/// - Weak items: cleared then re-imported via [WeakItemRepository.upsert].
+/// - Plans: existing plans deleted, then imported plans saved.
+/// - Review history: appended via [ReviewHistoryRepository.add] (the interface
+///   is append-only by design — no `clear()` method).
 ///
 /// Returns a summary string: `"imported: X weak items, Y plans, Z results"`.
+///
+/// Throws [FormatException] if the JSON is invalid.
 Future<String> importReviewData({
   required String jsonString,
-  required Box<WeakItem> weakItemBox,
-  required Box<ReviewPlan> planBox,
-  required Box<ReviewResult> historyBox,
+  required WeakItemRepository weakItemRepo,
+  required PlanRepository planRepo,
+  required ReviewHistoryRepository historyRepo,
 }) async {
   final data = json.decode(jsonString) as Map<String, dynamic>;
 
-  // Clear existing data.
-  await weakItemBox.clear();
-  await planBox.clear();
-  await historyBox.clear();
+  // ── Clear and re-import weak items ──────────────────────────────────────
+  await weakItemRepo.clear();
 
-  // Import weak items.
   final weakItems = data['weakItems'] as List? ?? [];
   for (final entry in weakItems) {
     final m = entry as Map<String, dynamic>;
-    final item = WeakItem(
+    await weakItemRepo.upsert(WeakItem(
       wordId: m['wordId'] as String,
       surah: m['surah'] as int,
       ayah: m['ayah'] as int,
@@ -107,11 +115,15 @@ Future<String> importReviewData({
       lastErrorAt: m['lastErrorAt'] as int,
       masteryScore: (m['masteryScore'] as num).toDouble(),
       forgetCount: m['forgetCount'] as int? ?? 0,
-    );
-    await weakItemBox.put(item.wordId, item);
+    ));
   }
 
-  // Import plans.
+  // ── Clear and re-import plans ───────────────────────────────────────────
+  final existingPlans = await planRepo.getAll();
+  for (final p in existingPlans) {
+    await planRepo.delete(p.id);
+  }
+
   final plans = data['plans'] as List? ?? [];
   for (final entry in plans) {
     final m = entry as Map<String, dynamic>;
@@ -132,29 +144,27 @@ Future<String> importReviewData({
         status: PlanItemStatusWire.fromWire(im['status'] as String),
       );
     }).toList();
-    final plan = ReviewPlan(
+    await planRepo.save(ReviewPlan(
       id: m['id'] as String,
       name: m['name'] as String,
       items: items,
       dailyTarget: m['dailyTarget'] as int,
       createdAt: m['createdAt'] as int,
       updatedAt: m['updatedAt'] as int,
-    );
-    await planBox.put(plan.id, plan);
+    ));
   }
 
-  // Import review history.
+  // ── Append review history (interface is append-only — no clear) ─────────
   final history = data['reviewHistory'] as List? ?? [];
   for (final entry in history) {
     final m = entry as Map<String, dynamic>;
-    final result = ReviewResult(
+    await historyRepo.add(ReviewResult(
       planItemId: m['planItemId'] as String,
       score: (m['score'] as num).toDouble(),
       confirmedErrors: m['confirmedErrors'] as int,
       totalWords: m['totalWords'] as int,
       reviewedAt: m['reviewedAt'] as int,
-    );
-    await historyBox.add(result);
+    ));
   }
 
   return 'imported: ${weakItems.length} weak items, ${plans.length} plans, ${history.length} results';

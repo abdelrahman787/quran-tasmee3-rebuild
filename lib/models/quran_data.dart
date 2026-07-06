@@ -8,6 +8,7 @@ library;
 
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:quran_tasmee3_core/recitation/matching_engine.dart';
 import 'package:quran_tasmee3_core/recitation/normalizer.dart';
@@ -216,6 +217,16 @@ class QuranData {
 
   /// Whether the full Quran text has been loaded.
   static bool get isLoaded => _isLoaded;
+
+  /// Seed a small fake dataset for widget tests, avoiding the 1.4 MB asset load.
+  ///
+  /// Adds the given ayah data to [_ayahTexts] and marks the class as loaded.
+  /// Intended **only** for test code — never call from production.
+  @visibleForTesting
+  static void seedForTesting(Map<String, AyahData> data) {
+    _ayahTexts.addAll(data);
+    _isLoaded = true;
+  }
 
   /// Get surah metadata by number.
   static SurahMeta? getSurah(int number) {

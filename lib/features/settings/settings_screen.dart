@@ -6,21 +6,19 @@
 ///  - Weakness threshold
 ///  - Mastery horizon (days)
 ///  - Merge contiguous ayat toggle
-///  - Data backup (export/import review data)
+///  - Data backup (export/import review data — delegated to data_backup.dart)
 ///  - About / version info
 library;
-
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:quran_tasmee3_core/recitation/recitation_config.dart';
-import 'package:quran_tasmee3_core/review/models.dart';
 import 'package:quran_tasmee3_core/review/settings.dart';
 
 import '../../app/app_theme.dart';
 import '../../app/providers.dart';
+import '../../services/persistence/data_backup.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -61,58 +59,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _exportData() async {
     setState(() => _isExporting = true);
     try {
-      final weakItemRepo = ref.read(weakItemRepoProvider);
-      final planRepo = ref.read(planRepoProvider);
-      final historyRepo = ref.read(reviewHistoryRepoProvider);
-
-      // Get the underlying Hive boxes.
-      final weakItems = await weakItemRepo.getAll();
-      final plans = await planRepo.getAll();
-      final history = await historyRepo.getAll();
-
-      // Build export JSON directly from the repository data.
-      final export = <String, dynamic>{
-        'version': 1,
-        'exportedAt': DateTime.now().millisecondsSinceEpoch,
-        'weakItems': weakItems.map((item) => {
-              'wordId': item.wordId,
-              'surah': item.surah,
-              'ayah': item.ayah,
-              'wordIndex': item.wordIndex,
-              'errorCount': item.errorCount,
-              'lastErrorAt': item.lastErrorAt,
-              'masteryScore': item.masteryScore,
-              'forgetCount': item.forgetCount,
-            }).toList(),
-        'plans': plans.map((plan) => {
-              'id': plan.id,
-              'name': plan.name,
-              'dailyTarget': plan.dailyTarget,
-              'createdAt': plan.createdAt,
-              'updatedAt': plan.updatedAt,
-              'items': plan.items.map((item) => {
-                    'id': item.id,
-                    'surah': item.surah,
-                    'ayah': item.ayah,
-                    'ayahEnd': item.ayahEnd,
-                    'ease': item.ease,
-                    'intervalDays': item.intervalDays,
-                    'repetitions': item.repetitions,
-                    'dueAt': item.dueAt,
-                    'lastScore': item.lastScore,
-                    'status': item.status.wire,
-                  }).toList(),
-            }).toList(),
-        'reviewHistory': history.map((r) => {
-              'planItemId': r.planItemId,
-              'score': r.score,
-              'confirmedErrors': r.confirmedErrors,
-              'totalWords': r.totalWords,
-              'reviewedAt': r.reviewedAt,
-            }).toList(),
-      };
-
-      final jsonString = const JsonEncoder.withIndent('  ').convert(export);
+      final jsonString = await exportReviewData(
+        weakItemRepo: ref.read(weakItemRepoProvider),
+        planRepo: ref.read(planRepoProvider),
+        historyRepo: ref.read(reviewHistoryRepoProvider),
+      );
 
       // Copy to clipboard for the user to paste anywhere.
       await Clipboard.setData(ClipboardData(text: jsonString));
@@ -120,10 +71,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              'تم تصدير البيانات (${weakItems.length} عنصر، '
-              '${plans.length} خطة، ${history.length} نتيجة).\n'
-              'تم نسخها إلى الحافظة.',
+            content: const Text(
+              'تم تصدير البيانات. تم نسخها إلى الحافظة.',
             ),
             backgroundColor: AppTheme.primaryGreen,
             duration: const Duration(seconds: 4),
@@ -186,72 +135,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     setState(() => _isImporting = true);
     try {
-      final weakItemRepo = ref.read(weakItemRepoProvider);
-      final planRepo = ref.read(planRepoProvider);
-
-      // Parse and validate JSON.
-      final data = json.decode(result) as Map<String, dynamic>;
-
-      // Clear and re-import via repositories.
-      await weakItemRepo.clear();
-
-      final weakItems = data['weakItems'] as List? ?? [];
-      for (final entry in weakItems) {
-        final m = entry as Map<String, dynamic>;
-        await weakItemRepo.upsert(WeakItem(
-          wordId: m['wordId'] as String,
-          surah: m['surah'] as int,
-          ayah: m['ayah'] as int,
-          wordIndex: m['wordIndex'] as int,
-          errorCount: m['errorCount'] as int,
-          lastErrorAt: m['lastErrorAt'] as int,
-          masteryScore: (m['masteryScore'] as num).toDouble(),
-          forgetCount: m['forgetCount'] as int? ?? 0,
-        ));
-      }
-
-      // For plans, we need to delete old ones and save new.
-      final existingPlans = await planRepo.getAll();
-      for (final p in existingPlans) {
-        await planRepo.delete(p.id);
-      }
-      final plans = data['plans'] as List? ?? [];
-      for (final entry in plans) {
-        final m = entry as Map<String, dynamic>;
-        final items = (m['items'] as List? ?? []).map((e) {
-          final im = e as Map<String, dynamic>;
-          return PlanItem(
-            id: im['id'] as String,
-            surah: im['surah'] as int,
-            ayah: im['ayah'] as int,
-            ayahEnd: im['ayahEnd'] as int?,
-            ease: (im['ease'] as num).toDouble(),
-            intervalDays: im['intervalDays'] as int,
-            repetitions: im['repetitions'] as int,
-            dueAt: im['dueAt'] as int,
-            lastScore: im['lastScore'] != null
-                ? (im['lastScore'] as num).toDouble()
-                : null,
-            status: PlanItemStatusWire.fromWire(im['status'] as String),
-          );
-        }).toList();
-        await planRepo.save(ReviewPlan(
-          id: m['id'] as String,
-          name: m['name'] as String,
-          items: items,
-          dailyTarget: m['dailyTarget'] as int,
-          createdAt: m['createdAt'] as int,
-          updatedAt: m['updatedAt'] as int,
-        ));
-      }
+      final summary = await importReviewData(
+        jsonString: result,
+        weakItemRepo: ref.read(weakItemRepoProvider),
+        planRepo: ref.read(planRepoProvider),
+        historyRepo: ref.read(reviewHistoryRepoProvider),
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              'تم استيراد البيانات بنجاح.\n'
-              '(${weakItems.length} عنصر، ${plans.length} خطة)',
-            ),
+            content: Text('تم استيراد البيانات بنجاح.\n$summary'),
             backgroundColor: AppTheme.primaryGreen,
             duration: const Duration(seconds: 3),
           ),
