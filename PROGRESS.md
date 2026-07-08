@@ -3,7 +3,7 @@
 **Project**: Tasmee3 Trainer (`com.tasmee3.trainer`)
 **Specification**: `MASTER_REBUILD_PROMPT.md` (48,856 bytes — 30+ hard-won lessons)
 **Date**: 2026-07-06
-**Status**: Phases 0–7 complete (Phase 4 ASR Gate 0 done, Gate 1/2 **blocked — needs physical Android device**), persistent storage implemented, 141 tests passing (full unedited stdout pasted below)
+**Status**: Phases 0–7 complete (Phase 4 ASR Gate 0 done, Gate 1/2 **BLOCKED — no physical Android device available in this session.**), human sign-off on model deviation added (§4a), debug APK verified building (305 MB, `record` upgraded to 6.x), persistent storage implemented, 141 tests passing (full unedited stdout pasted below)
 
 ---
 
@@ -860,6 +860,10 @@ Outputs for onnx/model_int8.onnx:
 
 **This is not a filename-matching guess.** The actual input tensor names were read from the downloaded model files using `onnxruntime.InferenceSession.get_inputs()`. None of the three models on the repo have the cache tensors that spec §4.2 requires.
 
+### 4a. Human Sign-Off on Model Deviation
+
+> Human sign-off (2026-07-06): Approved deviation from spec §2.1/§4.2. model_streaming_with_encoder.q8.onnx confirmed absent from Saboorhsn/quran-stt-onnx; model_with_encoder.q8.ort confirmed non-streaming via tensor inspection (no cache_last_channel/cache_last_time inputs). Approved: model_int8.onnx via onnxruntime Flutter package (never sherpa_onnx), full-utterance inference per VAD-detected segment, no cache tensors. This is safe from the spec §3.9 SIGSEGV history because that crash was specific to sherpa_onnx's native OfflineRecognizer decode path — running the same model through onnxruntime directly uses a completely different code path and has not been shown to share that failure mode. This must still be confirmed empirically in Gate 1 below, not assumed safe by analogy.
+
 ### 5. Available Options (For Human Decision)
 
 Given this evidence, the options are:
@@ -873,39 +877,121 @@ Given this evidence, the options are:
 
 ---
 
-## Phase 4 Gate Status — BLOCKED (No Device Access)
+## Phase 4 Gate Status
+
+### BLOCKED — no physical Android device available in this session.
+
+`adb devices` was run in this session and returned an empty device list:
+
+```
+$ adb devices
+List of devices attached
+
+```
+
+No physical Android device is connected to this environment. Gate 1 and Gate 2 **cannot be executed** here. No Gate 1 or Gate 2 results have been captured, simulated, or fabricated. The status below reflects this honestly.
 
 Per spec §9 Phase 2:
 
 | Gate | Description | Status |
 |------|-------------|--------|
 | Gate 0 | PC Python: run model variants through plain onnxruntime on a WAV file; confirm text + RTF | ✅ PASS (code compiles & unit-tests on Dart VM) |
-| Gate 1 | Device: load model + tokenizer, feed bundled test WAV chunk-by-chunk with cache carry, print text + RTF to logcat. No crash, no hallucination, RTF < 0.1. | ❌ **BLOCKED — needs physical Android device** |
-| Gate 2 | Device: wire mic stream through energy VAD → chunked inference → CTC decode. Tune VAD threshold on-device. Correct text, no hallucination during pauses, RTF < 0.1. | ❌ **BLOCKED — needs physical Android device** |
+| Gate 1 | Device: load model + tokenizer, feed bundled test WAV chunk-by-chunk, print text + RTF to logcat. No crash, no hallucination, RTF < 0.1. | ❌ **BLOCKED — no physical Android device available in this session.** |
+| Gate 2 | Device: wire mic stream through energy VAD → chunked inference → CTC decode. Tune VAD threshold on-device. Correct text, no hallucination during pauses, RTF < 0.1. | ❌ **BLOCKED — no physical Android device available in this session.** |
 
-### Device Access Verification
-
-`adb` is available in the sandbox (`/home/user/android-sdk/platform-tools/adb`), but `adb devices` returns an empty list — no physical Android device is connected. Gate 1 and Gate 2 **cannot be executed** in this environment.
-
-### `asrServiceProvider` Swap Point
+### `asrServiceProvider` Swap Point — NOT FLIPPED
 
 Per spec §9 Phase 2 step 5: "Only after Gate 2 passes cleanly does this phase count as done."
 
-`lib/app/providers.dart` line 36-38 still returns `FakeAsrServiceImpl()`. This **will not change** until Gate 2 passes on real hardware with verified logcat output showing correct text, no hallucination, and RTF < 0.1.
+`lib/app/providers.dart` lines 36-38 still returns `FakeAsrServiceImpl()`:
 
----
+```dart
+final asrServiceProvider = Provider<AsrService>((ref) {
+  return FakeAsrServiceImpl();
+});
+```
 
-## What's Next
+This **will not change** until a human confirms Gate 2 results on real hardware with verified logcat output showing correct text, no hallucination, and RTF < 0.1. The `FakeAsrServiceImpl` is retained for widget tests regardless.
 
-### Phase 4 — Native ASR Integration (Gates 1 & 2 — BLOCKED)
+### Dev ASR Screen — Verified Reachable in Code
 
-Gate 0 is complete. Gate 1/2 are **blocked — needs physical Android device with microphone**. `adb devices` returns empty list in this sandbox.
+The hidden dev ASR screen is reachable via 5x long-press on the Settings tab within 3 seconds, confirmed by code inspection of `lib/features/home/home_screen.dart`:
 
-**To unblock**: Connect a physical Android device, then:
-1. **Gate 1**: Build debug APK, install on device, run bundled-WAV mode, report actual logcat output
-2. **Gate 2**: Live-mic mode, tune VAD threshold using RMS debug log, report actual RMS numbers
-3. **Only after human confirms Gate 2**: flip `asrServiceProvider` from `FakeAsrServiceImpl` to real `StreamingAsrService`
-4. **Resolve model file**: Model investigation COMPLETE (see ASR Model Investigation section above). Evidence shows `model_with_encoder.q8.ort` is NOT the spec's streaming model — no cache tensor inputs found. Human decision needed on which option (A/B/C/D) to pursue.
+- `HomeScreen` tracks `_settingsLongPressCount` and `_firstLongPressTime`
+- On 5th long-press within 3 seconds: `Navigator.of(context).push(MaterialPageRoute(builder: (context) => const DevAsrScreen()))`
+- The `DevAsrScreen` (`lib/features/dev_asr/dev_asr_screen.dart`) provides:
+  - **WAV-file mode** (Gate 1): Dropdown to select `Al-Fatihah (1)` or `Al-Ikhlas (112)`, feeds bundled WAV chunk-by-chunk through `StreamingAsrService`
+  - **Live-mic mode** (Gate 2): Captures real microphone audio via `record` package, feeds through VAD → inference → CTC decode
+  - **VAD threshold slider**: Range 0.001–0.05, starting at 0.01 (marked "STARTING POINT — tune on-device"), with live RMS range display
+  - **Stats bar**: Shows result count, last RTF, avg RTF, and RTF < 0.1 pass/fail indicator
+  - **Results and logs tabs**: On-screen display of recognized text and isolate log messages
+
+Bundled test assets confirmed present:
+- `assets/models/asr/test_fatihah.wav` (149,708 bytes)
+- `assets/models/asr/test_ikhlas.wav` (117,106 bytes)
+- `assets/models/asr/model_int8.onnx` (174,544,089 bytes — ~175 MB, gitignored)
+- `assets/models/asr/tokens.txt` (12,847 bytes)
+
+### Debug APK Build — VERIFIED PASSING
+
+`flutter build apk --debug` was run in this session and succeeded:
+
+```
+$ flutter build apk --debug
+Running Gradle task 'assembleDebug'...                            131.1s
+✓ Built build/app/outputs/flutter-apk/app-debug.apk
+
+$ ls -lh build/app/outputs/flutter-apk/app-debug.apk
+-rw-r--r-- 1 user user 305M Jul  8 05:30 build/app/outputs/flutter-apk/app-debug.apk
+```
+
+**Result**: APK built successfully (305 MB, includes 175 MB ONNX model asset). Build time ~131 seconds. Exit code 0.
+
+**Dependency fix applied**: The `record` package was upgraded from `^5.1.3` to `^6.0.0` (resolves to 6.2.1). The 5.x series pulled `record_linux: 0.7.2` which was missing the `startStream` implementation required by `record_platform_interface: 1.6.0`, causing a compilation failure. `record: 6.2.1` pulls `record_linux: 1.3.1` which has the fix. API compatibility verified — `AudioRecorder`, `startStream(RecordConfig(...))`, `hasPermission()`, `stop()`, `dispose()`, `AudioEncoder.pcm16bits` all present in record 6.x with the same signatures used by `streaming_asr_service.dart`.
+
+`flutter analyze` also passes — 19 issues, all `info`-level (deprecated member uses, lint hints), zero errors or warnings.
+
+### Handoff Instructions for Human (Gate 1 & Gate 2)
+
+Everything that can be verified without a physical Android phone has been verified: the code compiles, the debug APK builds, `flutter analyze` is clean, and the dev ASR screen is confirmed reachable via code inspection. The remaining risk — does the pipeline actually transcribe correctly on-device, without crashing, within the RTF budget — can only be resolved by running it on real hardware. A human with a physical Android device should follow these steps:
+
+**Prerequisites**:
+1. Connect a physical Android device via USB (enable USB debugging in Developer Options)
+2. Verify device is visible: `adb devices` (should show a non-empty list)
+3. Build debug APK: `flutter build apk --debug` (verified passing in this session — 305 MB, ~131s build time)
+4. Install on device: `adb install build/app/outputs/flutter-apk/app-debug.apk` (or `flutter run` directly)
+
+**Gate 1 — Bundled WAV (no microphone needed)**:
+5. Open the app, long-press the Settings tab icon 5 times within 3 seconds to reach the hidden dev ASR screen
+6. Select "WAV File" mode, choose "Al-Fatihah (1)" from the dropdown
+7. Press "Start" — the screen will show "Loading model..." while the ONNX model loads (~175 MB into memory)
+8. The WAV is fed chunk-by-chunk (200ms per chunk) through the pipeline
+9. Watch the Results tab and Logs tab for output
+10. Capture `adb logcat` output covering the entire run: `adb logcat -s flutter,asr-isolate | tee gate1_logcat.txt`
+11. **Gate 1 passes only if**: no crash/exception stack trace, RTF < 0.1 (shown in stats bar), and the transcribed text is a plausible match for Al-Fatihah (a human must read and confirm the text)
+12. Look specifically for hallucination signs: text appearing during silence gaps in the WAV
+
+**Gate 2 — Live Microphone**:
+13. From the same dev screen, switch to "Live Mic" mode
+14. Press "Start" — grant microphone permission when prompted
+15. Recite a short, known passage (e.g. Al-Fatihah) while watching the live partial text and RTF counter
+16. Tune the VAD threshold using the on-screen slider while watching the "Recent RMS range" display — adjust until: silence reliably stays silent (no spurious segments), and speech reliably triggers a segment within 1-2 chunks of starting to speak
+17. Capture at least 3 separate utterances: the recognized text, the RTF, and the final tuned VAD threshold value
+18. Capture `adb logcat` output: `adb logcat -s flutter,asr-isolate | tee gate2_logcat.txt`
+19. **Gate 2 passes only if**: no crash across 3+ utterances and a silence period, RTF < 0.1, no hallucinated text during silence, and a human confirms the transcription accuracy on their own recitation
+
+**After Gate 2 passes (human-confirmed)**:
+20. In `lib/app/providers.dart`, change `asrServiceProvider` from `FakeAsrServiceImpl()` to `StreamingAsrService()`:
+    ```dart
+    import '../services/streaming_asr_service.dart';
+    final asrServiceProvider = Provider<AsrService>((ref) {
+      return StreamingAsrService();
+    });
+    ```
+21. Keep `FakeAsrServiceImpl` in the codebase — it is used by widget tests via `seedForTesting`-style overrides
+22. Run the full test suite: `cd packages/quran_tasmee3_core && dart test` (128 tests) + `flutter test test/persistence_test.dart` (12 tests) + `flutter test test/widget_test.dart` (1 test)
+23. Paste the real, complete test output into PROGRESS.md (same evidence bar — no summarizing)
+24. Update PROGRESS.md's top-level status to reflect that Phase 2/4 (ASR) is device-verified, with Gate 1 and Gate 2 logcat evidence quoted in that section
 
 ### Phase 5 — Persistent Storage ✅ COMPLETE
 
@@ -952,7 +1038,8 @@ Gate 0 is complete. Gate 1/2 are **blocked — needs physical Android device wit
 | File | Action | Description |
 |------|--------|-------------|
 | `packages/quran_tasmee3_core/` | Copied | Entire pure-Dart core engine, 128 tests |
-| `pubspec.yaml` | Modified | Added core path dep + all app dependencies |
+| `pubspec.yaml` | Modified | Added core path dep + all app dependencies. Phase B: Upgraded `record` from `^5.1.3` to `^6.0.0` to fix `record_linux` 0.7.2 missing `startStream` compilation failure. |
+| `pubspec.lock` | Regenerated | Phase B: Regenerated after `record` version change. Now resolves `record` to 6.2.1 with `record_linux` 1.3.1. |
 | `lib/models/quran_data.dart` | Created | 114 surah metadata + 9 embedded ayah texts |
 | `lib/app/app_theme.dart` | Created | MD3 theme with Islamic color palette |
 | `lib/app/providers.dart` | Created | Riverpod providers with SWAP POINTS |
@@ -969,11 +1056,14 @@ Gate 0 is complete. Gate 1/2 are **blocked — needs physical Android device wit
 | `android/build.gradle.kts` | Modified | Added gradle.afterProject compileSdk force-bump |
 | `test/widget_test.dart` | Modified | Updated to test bottom nav rendering |
 | `.gitignore` | Modified | Added secrets and model assets exclusions |
-| `lib/services/asr/streaming_asr_service.dart` | Created | Phase 4: Pure-Dart streaming ASR pipeline with energy VAD |
-| `lib/services/asr/audio_chunk.dart` | Created | Phase 4: Audio chunk model (PCM 16-bit) |
+| `lib/services/streaming_asr_service.dart` | Created | Phase 4: Pure-Dart streaming ASR pipeline with energy VAD, onnxruntime isolate |
+| `lib/services/asr/asr_isolate.dart` | Created | Phase 4: Background isolate for ONNX inference (VAD → mel → ONNX → CTC decode) |
 | `lib/services/asr/energy_vad.dart` | Created | Phase 4: Pure-Dart energy-based voice activity detection |
-| `lib/services/asr/asr_pipeline.dart` | Created | Phase 4: Streaming inference orchestrator with cache plumbing |
-| `lib/features/asr_dev/asr_dev_screen.dart` | Created | Phase 4: Developer diagnostic screen for real-device testing |
+| `lib/services/asr/mel_features.dart` | Created | Phase 4: Log-mel spectrogram feature extraction |
+| `lib/services/asr/ctc_decoder.dart` | Created | Phase 4: CTC greedy decoding + token-to-text mapping |
+| `lib/services/asr/wav_parser.dart` | Created | Phase 4: Minimal WAV parser for dev-screen Gate 1 testing |
+| `lib/features/dev_asr/dev_asr_screen.dart` | Created | Phase 4: Developer diagnostic screen for real-device testing (Gate 1/2) |
+| `lib/features/dev_asr/dev_asr_screen_stub.dart` | Created | Phase 4: Web stub for conditional import (dev screen requires dart:io) |
 | `lib/services/persistence/hive_adapters.dart` | Created | Phase 5: Manual Hive TypeAdapters (WeakItem=11, PlanItem=12, ReviewPlan=13, ReviewResult=14) |
 | `lib/services/persistence/hive_repositories.dart` | Created | Phase 5: HiveWeakItemRepository, HivePlanRepository, HiveReviewHistoryRepository |
 | `lib/services/persistence/prefs_settings_repository.dart` | Created | Phase 5: SharedPreferencesSettingsRepository with 5 settings keys |
@@ -984,7 +1074,7 @@ Gate 0 is complete. Gate 1/2 are **blocked — needs physical Android device wit
 | `lib/features/settings/settings_screen.dart` | Modified | Defect 1 fix: Delegates to `exportReviewData()` / `importReviewData()` from `data_backup.dart`. Removed unused `models.dart` import. No more inline duplicate JSON serialization. |
 | `lib/models/quran_data.dart` | Modified | Defect 2 fix: Added `@visibleForTesting static void seedForTesting(Map<String, AyahData> data)` method for widget tests. Also updated for Phase 6: full 6236 ayahs from `assets/quran/quran_uthmani.json` (1.4MB). |
 | `test/widget_test.dart` | Modified | Defect 2 fix: Replaced `await QuranData.load()` with `QuranData.seedForTesting({'1:1': ...})` to avoid loading 1.4MB JSON. 1/1 PASS verified. |
-| `PROGRESS.md` | Modified | Re-ran all 3 test suites fresh this session (128 core + 12 persistence + 1 widget = 141 tests, all PASS). Pasted complete unedited stdout in fenced code blocks — not summaries, not tables. Re-ran HuggingFace file listing with timestamp 2026-07-06T08:36:53.919789. Fetched README.md (18,316 bytes) and pasted verbatim table excerpts. Downloaded and inspected tensor inputs for 3 model files (model_with_encoder.q8.ort, fc_context_encoder.ort, model_int8.onnx) — none have cache tensors. Previous core test stdout was stale (wrong test descriptions) — replaced with genuine output. |
+| `PROGRESS.md` | Modified | Phase A: Re-ran all 3 test suites fresh (128 core + 12 persistence + 1 widget = 141 tests, all PASS). Pasted complete unedited stdout. Re-ran HuggingFace file listing with timestamp 2026-07-06T08:36:53.919789. Fetched README.md (18,316 bytes), pasted verbatim table excerpts. Downloaded and inspected tensor inputs for 3 model files — none have cache tensors. Replaced stale core test stdout. Phase B: Added verbatim human sign-off quote to ASR model section (§4a). Checked `adb devices` — empty, no physical device. Updated Phase 4 Gate Status with explicit "BLOCKED — no physical Android device available in this session." Added detailed handoff instructions for human to run Gate 1 & Gate 2 on real hardware. Verified dev ASR screen reachable via code inspection (5x long-press Settings tab in home_screen.dart). Corrected file ledger paths (asr_isolate.dart, dev_asr_screen.dart, wav_parser.dart, etc.). Verified debug APK builds successfully (305 MB, `record` upgraded to `^6.0.0`). |
 
 ---
 
@@ -1008,9 +1098,10 @@ Gate 0 is complete. Gate 1/2 are **blocked — needs physical Android device wit
 - [x] Write PROGRESS.md file
 - [x] Push to GitHub
 - [x] Phase 4: Native ASR integration — Gate 0 complete (pure-Dart pipeline compiles & tests on Dart VM)
-- [ ] Phase 4: ASR Gate 1 — **BLOCKED — needs physical Android device** (`adb devices` returns empty list)
-- [ ] Phase 4: ASR Gate 2 — **BLOCKED — needs physical Android device** (`adb devices` returns empty list)
-- [ ] Phase 4: ASR model file resolution — `model_streaming_with_encoder.q8.onnx` does NOT exist on HuggingFace repo. Closest: `onnx/model_with_encoder.q8.ort`. Awaiting human confirmation.
+- [ ] Phase 4: ASR Gate 1 — **BLOCKED — no physical Android device available in this session.** (`adb devices` returns empty list). Human sign-off on model deviation added (§4a). Handoff instructions provided.
+- [ ] Phase 4: ASR Gate 2 — **BLOCKED — no physical Android device available in this session.** (`adb devices` returns empty list). Handoff instructions provided.
+- [x] Phase 4: ASR model file resolution — `model_streaming_with_encoder.q8.onnx` confirmed absent from HuggingFace repo. `model_with_encoder.q8.ort` confirmed non-streaming via tensor inspection. **Human has approved deviation** (see §4a sign-off). Approved: `model_int8.onnx` via onnxruntime, full-utterance per VAD segment.
+- [x] Phase 4: Debug APK builds — `flutter build apk --debug` verified PASSING (305 MB, exit code 0). `record` upgraded to `^6.0.0` to fix `record_linux` compilation failure. `flutter analyze` clean (19 info-level issues, zero errors).
 - [x] Phase 5: Persistent storage (Hive repositories + SharedPreferences settings)
 - [x] Phase 5: Write persistence tests (12 tests, all passing)
 - [x] Phase 6: Full Quran data (all 114 surahs, 6236 ayahs from JSON asset)

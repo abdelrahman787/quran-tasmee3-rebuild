@@ -36,7 +36,10 @@ dependencies:
   # onnxruntime: direct FFI bindings to libonnxruntime.so. NO sherpa_onnx.
   onnxruntime: 1.4.1
   # record: microphone capture (PCM16, 16kHz, mono) for live mic mode.
-  record: ^5.1.3
+  # Upgraded from 5.x to 6.x — 5.x pulls record_linux 0.7.2 which is missing
+  # startStream implementation required by record_platform_interface 1.6.0.
+  # record 6.2.1 pulls record_linux 1.3.1 which has the fix.
+  record: ^6.0.0
   # ffi: required by onnxruntime package for dart:ffi bindings.
   ffi: ^2.0.1
 
