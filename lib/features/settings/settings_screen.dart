@@ -20,6 +20,11 @@ import '../../app/app_theme.dart';
 import '../../app/providers.dart';
 import '../../services/persistence/data_backup.dart';
 
+// Conditional import: real dev screen on mobile (dart:io), stub on web.
+// Both files export DevAsrScreen with the same API.
+import '../dev_asr/dev_asr_screen_stub.dart'
+    if (dart.library.io) '../dev_asr/dev_asr_screen.dart';
+
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
@@ -32,6 +37,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _isLoading = true;
   bool _isExporting = false;
   bool _isImporting = false;
+
+  // Hidden dev screen access: tap version/about row 7 times within 3 seconds.
+  // Uses plain onTap (not onLongPress) to avoid gesture-arena conflicts.
+  // Follows Android's "Developer options" convention.
+  int _versionTapCount = 0;
+  DateTime? _firstVersionTapTime;
 
   @override
   void initState() {
@@ -54,6 +65,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final repo = ref.read(settingsRepoProvider);
     await repo.save(settings);
     setState(() => _settings = settings);
+  }
+
+  void _onVersionTap() {
+    final now = DateTime.now();
+
+    // Reset count if more than 3 seconds since first tap.
+    if (_firstVersionTapTime != null &&
+        now.difference(_firstVersionTapTime!).inSeconds > 3) {
+      _versionTapCount = 0;
+    }
+
+    if (_versionTapCount == 0) {
+      _firstVersionTapTime = now;
+    }
+
+    _versionTapCount++;
+
+    if (_versionTapCount >= 7) {
+      _versionTapCount = 0;
+      _firstVersionTapTime = null;
+
+      // Navigate to dev ASR screen.
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (context) => const DevAsrScreen()),
+      );
+    }
   }
 
   Future<void> _exportData() async {
@@ -198,7 +235,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     onImport: _importData,
                   ),
                   const SizedBox(height: 16),
-                  _AboutSection(),
+                  _AboutSection(onVersionTap: _onVersionTap),
                 ],
               ),
             ),
@@ -461,6 +498,10 @@ class _DataBackupSection extends StatelessWidget {
 }
 
 class _AboutSection extends StatelessWidget {
+  final VoidCallback onVersionTap;
+
+  const _AboutSection({required this.onVersionTap});
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -492,16 +533,22 @@ class _AboutSection extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 16),
-            const Row(
-              children: [
-                Text(
-                  'الإصدار: 1.0.0',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.grey,
+            // Version row — tap 7 times within 3 seconds to open dev ASR screen.
+            // Uses plain onTap (not onLongPress) to avoid gesture-arena conflicts.
+            GestureDetector(
+              onTap: onVersionTap,
+              behavior: HitTestBehavior.opaque,
+              child: const Row(
+                children: [
+                  Text(
+                    'الإصدار: 1.0.0',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Colors.grey,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ],
         ),

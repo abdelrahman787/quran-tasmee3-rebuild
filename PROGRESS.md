@@ -915,10 +915,11 @@ This **will not change** until a human confirms Gate 2 results on real hardware 
 
 ### Dev ASR Screen — Verified Reachable in Code
 
-The hidden dev ASR screen is reachable via 5x long-press on the Settings tab within 3 seconds, confirmed by code inspection of `lib/features/home/home_screen.dart`:
+The hidden dev ASR screen is reachable via 7 taps on the version/about row in the Settings screen within 3 seconds, confirmed by code inspection of `lib/features/settings/settings_screen.dart`:
 
-- `HomeScreen` tracks `_settingsLongPressCount` and `_firstLongPressTime`
-- On 5th long-press within 3 seconds: `Navigator.of(context).push(MaterialPageRoute(builder: (context) => const DevAsrScreen()))`
+- `_SettingsScreenState` tracks `_versionTapCount` and `_firstVersionTapTime`
+- On 7th tap within 3 seconds: `Navigator.of(context).push(MaterialPageRoute(builder: (context) => const DevAsrScreen()))`
+- Uses plain `onTap` (not `onLongPress`) on a `GestureDetector` wrapping the version row in `_AboutSection` — avoids the gesture-arena conflict that made the old 5x long-press on the bottom-nav Settings icon unreliable on real devices
 - The `DevAsrScreen` (`lib/features/dev_asr/dev_asr_screen.dart`) provides:
   - **WAV-file mode** (Gate 1): Dropdown to select `Al-Fatihah (1)` or `Al-Ikhlas (112)`, feeds bundled WAV chunk-by-chunk through `StreamingAsrService`
   - **Live-mic mode** (Gate 2): Captures real microphone audio via `record` package, feeds through VAD → inference → CTC decode
@@ -962,7 +963,7 @@ Everything that can be verified without a physical Android phone has been verifi
 4. Install on device: `adb install build/app/outputs/flutter-apk/app-debug.apk` (or `flutter run` directly)
 
 **Gate 1 — Bundled WAV (no microphone needed)**:
-5. Open the app, long-press the Settings tab icon 5 times within 3 seconds to reach the hidden dev ASR screen
+5. Open the app, navigate to the Settings (إعدادات) tab, then tap the version/about row ("الإصدار: 1.0.0") 7 times within 3 seconds to reach the hidden dev ASR screen
 6. Select "WAV File" mode, choose "Al-Fatihah (1)" from the dropdown
 7. Press "Start" — the screen will show "Loading model..." while the ONNX model loads (~175 MB into memory)
 8. The WAV is fed chunk-by-chunk (200ms per chunk) through the pipeline
@@ -1074,7 +1075,7 @@ Everything that can be verified without a physical Android phone has been verifi
 | `lib/features/settings/settings_screen.dart` | Modified | Defect 1 fix: Delegates to `exportReviewData()` / `importReviewData()` from `data_backup.dart`. Removed unused `models.dart` import. No more inline duplicate JSON serialization. |
 | `lib/models/quran_data.dart` | Modified | Defect 2 fix: Added `@visibleForTesting static void seedForTesting(Map<String, AyahData> data)` method for widget tests. Also updated for Phase 6: full 6236 ayahs from `assets/quran/quran_uthmani.json` (1.4MB). |
 | `test/widget_test.dart` | Modified | Defect 2 fix: Replaced `await QuranData.load()` with `QuranData.seedForTesting({'1:1': ...})` to avoid loading 1.4MB JSON. 1/1 PASS verified. |
-| `PROGRESS.md` | Modified | Phase A: Re-ran all 3 test suites fresh (128 core + 12 persistence + 1 widget = 141 tests, all PASS). Pasted complete unedited stdout. Re-ran HuggingFace file listing with timestamp 2026-07-06T08:36:53.919789. Fetched README.md (18,316 bytes), pasted verbatim table excerpts. Downloaded and inspected tensor inputs for 3 model files — none have cache tensors. Replaced stale core test stdout. Phase B: Added verbatim human sign-off quote to ASR model section (§4a). Checked `adb devices` — empty, no physical device. Updated Phase 4 Gate Status with explicit "BLOCKED — no physical Android device available in this session." Added detailed handoff instructions for human to run Gate 1 & Gate 2 on real hardware. Verified dev ASR screen reachable via code inspection (5x long-press Settings tab in home_screen.dart). Corrected file ledger paths (asr_isolate.dart, dev_asr_screen.dart, wav_parser.dart, etc.). Verified debug APK builds successfully (305 MB, `record` upgraded to `^6.0.0`). |
+| `PROGRESS.md` | Modified | Phase A: Re-ran all 3 test suites fresh (128 core + 12 persistence + 1 widget = 141 tests, all PASS). Pasted complete unedited stdout. Re-ran HuggingFace file listing with timestamp 2026-07-06T08:36:53.919789. Fetched README.md (18,316 bytes), pasted verbatim table excerpts. Downloaded and inspected tensor inputs for 3 model files — none have cache tensors. Replaced stale core test stdout. Phase B: Added verbatim human sign-off quote to ASR model section (§4a). Checked `adb devices` — empty, no physical device. Updated Phase 4 Gate Status with explicit "BLOCKED — no physical Android device available in this session." Added detailed handoff instructions for human to run Gate 1 & Gate 2 on real hardware. Verified dev ASR screen reachable via code inspection (originally 5x long-press Settings tab in home_screen.dart; later replaced with 7-tap version row in settings_screen.dart due to gesture-arena unreliability on real devices). Corrected file ledger paths (asr_isolate.dart, dev_asr_screen.dart, wav_parser.dart, etc.). Verified debug APK builds successfully (305 MB, `record` upgraded to `^6.0.0`). |
 
 ---
 
@@ -1199,24 +1200,21 @@ Global RTL via `locale: const Locale('ar')` + `Directionality(textDirection: Tex
 
 ### Part 3 — ASR/Audio Readiness
 
-**Dev screen trigger** (`home_screen.dart`):
+**Dev screen trigger** (`settings_screen.dart`):
 
 ```
-$ grep -n "settingsLongPress\|_onSettingsLongPress\|DevAsrScreen" lib/features/home/home_screen.dart
-38:  int _settingsLongPressCount = 0;
-48:  void _onSettingsLongPress() {
-54:      _settingsLongPressCount = 0;
-57:    if (_settingsLongPressCount == 0) {
-61:    _settingsLongPressCount++;
-63:    if (_settingsLongPressCount >= 5) {
-64:      _settingsLongPressCount = 0;
-70:          builder: (context) => const DevAsrScreen(),
-101:              onLongPress: _onSettingsLongPress,
+$ grep -n "versionTap\|_onVersionTap\|DevAsrScreen" lib/features/settings/settings_screen.dart
+44:  int _versionTapCount = 0;
+70:  void _onVersionTap() {
+85:    if (_versionTapCount >= 7) {
+91:          builder: (context) => const DevAsrScreen(),
+238:                  _AboutSection(onVersionTap: _onVersionTap),
+539:              onTap: onVersionTap,
 ```
 
-5x long-press on Settings tab icon within 3 seconds → navigates to `DevAsrScreen`. Wired via `GestureDetector(onLongPress: _onSettingsLongPress)` at line 101. **VERIFIED.**
+7 taps on the version/about row ("الإصدار: 1.0.0") within 3 seconds → navigates to `DevAsrScreen`. Wired via `GestureDetector(onTap: onVersionTap)` at line 538 in `_AboutSection`, with the tap counter state (`_versionTapCount`, `_firstVersionTapTime`) and `_onVersionTap()` method in `_SettingsScreenState`. Uses plain `onTap` (not `onLongPress`) — follows Android's "Developer options" convention and avoids the gesture-arena conflict with `BottomNavigationBar` that made the previous 5x long-press on the bottom-nav Settings icon unreliable on real devices. **VERIFIED by code inspection; NOT yet confirmed on a real device — pending human tester report.**
 
-**Conditional import** (`home_screen.dart` lines 24-25):
+**Conditional import** (`settings_screen.dart` lines 25-26):
 ```dart
 import '../dev_asr/dev_asr_screen_stub.dart'
     if (dart.library.io) '../dev_asr/dev_asr_screen.dart';
@@ -1594,8 +1592,8 @@ The following is the exact manual steps a human should follow after installing t
 > **⚠️ WARNING**: This section tests the REAL on-device ASR pipeline (ONNX model inference, VAD, microphone capture). It requires the 175 MB ONNX model to load into memory (~10-30 seconds). This is the Gate 1/2 testing path. Skip this section if you only want to verify the app UI.
 
 39. Go to the Settings (إعدادات) tab.
-40. Long-press the Settings tab icon (the gear icon at the bottom) — **Expected**: Nothing visible happens on first press.
-41. Repeat the long-press 4 more times (total 5 long-presses), all within 3 seconds of the first press — **Expected**: The app navigates to the Dev ASR Screen.
+40. Scroll to the bottom of the Settings screen and locate the "About" (حول التطبيق) section, which shows the version row "الإصدار: 1.0.0".
+41. Tap the version row ("الإصدار: 1.0.0") 7 times rapidly, all within 3 seconds of the first tap — **Expected**: The app navigates to the Dev ASR Screen. (Nothing visible happens on the first 6 taps; the screen opens on the 7th tap.) This follows the Android "Developer options" convention and uses plain `onTap` (not `onLongPress`) to avoid gesture-arena conflicts with `BottomNavigationBar`.
 42. **Expected**: Dev ASR screen shows two modes: "WAV File" (Gate 1) and "Live Mic" (Gate 2), a VAD threshold slider (range 0.001–0.05, starting at 0.01), a stats bar, and Results/Logs tabs.
 43. For **Gate 1 (WAV File)**: Select "Al-Fatihah (1)" from the dropdown, press "Start" — **Expected**: "Loading model..." appears while the ONNX model loads. Then the WAV is fed chunk-by-chunk. Watch Results tab for recognized text and Logs tab for isolate messages. Check the stats bar for RTF < 0.1.
 44. For **Gate 2 (Live Mic)**: Switch to "Live Mic" mode, press "Start" — **Expected**: System microphone permission dialog appears. Grant it. Recite a short passage. Watch live partial text and RTF counter. Tune VAD threshold using the slider while watching "Recent RMS range".
