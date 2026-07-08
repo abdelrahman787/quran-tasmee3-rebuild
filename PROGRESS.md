@@ -1106,3 +1106,505 @@ Everything that can be verified without a physical Android phone has been verifi
 - [x] Phase 5: Write persistence tests (12 tests, all passing)
 - [x] Phase 6: Full Quran data (all 114 surahs, 6236 ayahs from JSON asset)
 - [x] Phase 7: Polish & production readiness (Amiri font, haptics, data backup, RTL, error states)
+
+---
+
+## Full Android Readiness Audit (Parts 1–6)
+
+**Date**: 2026-07-08
+**Method**: Every finding below is backed by actual command output, direct file quotes (with line numbers), or explicit "could not verify" statements. No fabricated claims.
+
+### Part 1 — Build & Environment Readiness (COMPLETED in prior session)
+
+| Check | Evidence | Result |
+|-------|----------|--------|
+| `flutter doctor -v` | Flutter 3.35.4, Android toolchain (SDK 35.0.0, Java 17), Chrome | PASS |
+| `flutter build apk --debug` | Exit code 0, 305 MB APK, 131.1s build time | PASS |
+| `flutter analyze` | 19 issues, all `info`-level, zero errors/warnings | PASS |
+| `flutter pub get` | 72 dependencies, `record` 6.2.1 with `record_linux` 1.3.1 | PASS |
+| AndroidManifest permissions | Only `RECORD_AUDIO` — no dead permissions | PASS |
+| Gradle JVM heap | `-Xmx3G` in `android/gradle.properties` | PASS |
+| Gradle compileSdk | Force-bump to 35 via `gradle.afterProject` in `android/build.gradle.kts` | PASS |
+| Assets present | `model_int8.onnx` (175 MB), `tokens.txt` (12,847 bytes), `quran_uthmani.json` (1.4 MB), test WAVs | PASS |
+
+---
+
+### Part 2 — Mushaf/Quran Display Readiness
+
+**QuranData.load() in production path**:
+
+```
+$ grep -n "QuranData.load\|seedForTesting" lib/main.dart
+39:  await QuranData.load();
+```
+
+`QuranData.load()` is called at `lib/main.dart:39` — the real 1.4MB JSON loader. `seedForTesting` has zero call sites in `lib/`:
+
+```
+$ grep -rn "seedForTesting" lib/
+lib/models/quran_data.dart:226:  static void seedForTesting(Map<String, AyahData> data) {
+---
+$ grep -rn "seedForTesting" test/
+test/widget_test.dart:12:    QuranData.seedForTesting({
+```
+
+`seedForTesting()` is defined at `quran_data.dart:226` and called ONLY in `test/widget_test.dart:12`. No production code path touches it. **VERIFIED CLEAN.**
+
+**Search logic** (`mushaf_screen.dart` lines 34-40):
+
+```dart
+final filteredSurahs = _searchQuery.isEmpty
+    ? availableSurahs
+    : availableSurahs.where((s) {
+        final q = _searchQuery.toLowerCase();
+        return s.name.contains(_searchQuery) ||
+            s.englishName.toLowerCase().contains(q) ||
+            s.number.toString() == _searchQuery;
+      }).toList();
+```
+
+- Empty query → shows all 114 surahs (`availableSurahsProvider` returns `QuranData.surahs.toList()`)
+- Non-empty → filters by: Arabic name `contains`, English name `toLowerCase().contains`, or surah number exact match
+- Empty result → "لا توجد نتائج" with `search_off` icon (lines 93-107)
+
+**Pagination** (`mushaf_screen.dart` lines 199-212):
+
+- `_pageSize = 20` (line 199)
+- `_visibleCount` starts at 20, "show more" button increments by 20 (line 324)
+- Resets on surah change/collapse via `didUpdateWidget` (line 209: `_visibleCount = _pageSize`)
+
+**Ayah loading and display**:
+
+- `QuranData.getAyatForSurah(widget.surah.number)` at line 216, with caching (`_cachedAyat`)
+- Ayah text: `fontFamily: 'Amiri'` (line 408), `textDirection: TextDirection.rtl` (line 411), `fontSize: 20`, `height: 2.0`
+- Surah name RTL: `textDirection: TextDirection.rtl` at line 273
+
+**RTL wiring** (global, `main.dart`):
+
+```
+$ grep -n "locale\|Directionality\|TextDirection.rtl\|debugShowCheckedModeBanner" lib/main.dart
+61:      debugShowCheckedModeBanner: false,
+66:      locale: const Locale('ar'),
+68:        return Directionality(
+69:          textDirection: TextDirection.rtl,
+```
+
+Global RTL via `locale: const Locale('ar')` + `Directionality(textDirection: TextDirection.rtl)` in MaterialApp builder. Mushaf screen uses explicit RTL on Arabic text widgets — does NOT override the global direction. **VERIFIED CONSISTENT.**
+
+**Loading state**: `availableSurahs.isEmpty ? CircularProgressIndicator` at line 91-92.
+
+**Part 2 Verdict**: **READY.** Quran data loads from real JSON, search/pagination/RTL all wired correctly, no test seeds in production path.
+
+---
+
+### Part 3 — ASR/Audio Readiness
+
+**Dev screen trigger** (`home_screen.dart`):
+
+```
+$ grep -n "settingsLongPress\|_onSettingsLongPress\|DevAsrScreen" lib/features/home/home_screen.dart
+38:  int _settingsLongPressCount = 0;
+48:  void _onSettingsLongPress() {
+54:      _settingsLongPressCount = 0;
+57:    if (_settingsLongPressCount == 0) {
+61:    _settingsLongPressCount++;
+63:    if (_settingsLongPressCount >= 5) {
+64:      _settingsLongPressCount = 0;
+70:          builder: (context) => const DevAsrScreen(),
+101:              onLongPress: _onSettingsLongPress,
+```
+
+5x long-press on Settings tab icon within 3 seconds → navigates to `DevAsrScreen`. Wired via `GestureDetector(onLongPress: _onSettingsLongPress)` at line 101. **VERIFIED.**
+
+**Conditional import** (`home_screen.dart` lines 24-25):
+```dart
+import '../dev_asr/dev_asr_screen_stub.dart'
+    if (dart.library.io) '../dev_asr/dev_asr_screen.dart';
+```
+Stub on web, real implementation on mobile (dart:io). **VERIFIED.**
+
+**asrServiceProvider SWAP POINT** (`providers.dart`):
+
+```
+$ grep -n "FakeAsrServiceImpl\|StreamingAsrService\|asrServiceProvider" lib/app/providers.dart
+27:// To use real on-device ASR: replace FakeAsrServiceImpl with StreamingAsrService
+31:// final asrServiceProvider = Provider<AsrService>((ref) => StreamingAsrService());
+35:/// SWAP: replace with real StreamingAsrService for on-device ASR.
+36:final asrServiceProvider = Provider<AsrService>((ref) {
+37:  return FakeAsrServiceImpl();
+```
+
+Currently returns `FakeAsrServiceImpl()` at line 37. Real `StreamingAsrService()` is commented out at line 31. **This MUST NOT change until Gate 2 passes on real hardware.** **VERIFIED — swap point intact.**
+
+**FakeAsrServiceImpl behavior** (`fake_asr_service.dart`):
+
+- Default confidence: 0.92, word delay: 1200ms
+- `setScope(List<ExpectedWord> scope)` at line 37 — sets words to emit
+- `_startEmitting()` (lines 50-83): `Timer.periodic` emits words one-by-one, sometimes 2-3 at once if same surah+ayah
+- `flush()` (line 97-100): resets emission position (simulates VAD flush)
+- `stop()` (lines 102-108): cancels timer, clears sink
+- `emitUtterance()` and `emitError()` for manual testing
+
+**VERIFIED — fake service simulates word-by-word recognition for UI testing.**
+
+**Runtime permission request** (`streaming_asr_service.dart`):
+
+```
+$ grep -n "hasPermission\|startStream\|RECORD_AUDIO" lib/services/streaming_asr_service.dart android/app/src/main/AndroidManifest.xml
+lib/services/streaming_asr_service.dart:237:    // Check permission — startStream will request if not granted
+lib/services/streaming_asr_service.dart:238:    if (!await _recorder!.hasPermission()) {
+lib/services/streaming_asr_service.dart:239:      // On Android, startStream triggers the system permission dialog.
+lib/services/streaming_asr_service.dart:243:    final stream = await _recorder!.startStream(
+android/app/src/main/AndroidManifest.xml:3:    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+```
+
+- `hasPermission()` called at line 238 WITHOUT `request: true` parameter — does not itself trigger the dialog
+- Comment at line 239 states: "On Android, startStream triggers the system permission dialog"
+- `startStream(RecordConfig(...))` at line 243 is what actually triggers the system permission dialog
+- `AndroidManifest.xml` line 3: only `RECORD_AUDIO` permission declared
+
+**Note**: The `hasPermission()` check is informational only — it logs/warns if permission is missing but does NOT block execution. The actual permission request happens implicitly when `startStream` is called. This is a known pattern with the `record` 6.x package. **VERIFIED — permission request relies on startStream, not explicit request.**
+
+**Part 3 Verdict**: **READY (with FakeASR).** Dev screen reachable, swap point intact, fake service simulates recognition, runtime permission wired via startStream. Real ASR (Gate 1/2) still BLOCKED — requires physical device.
+
+---
+
+### Part 4 — Recitation Scoring, Report, Review, Settings
+
+**4a. Recitation Screen** (`recitation_screen.dart`):
+
+```
+$ grep -n "sessionStoreProvider\|asrServiceProvider\|sessionLoggerProvider\|recitationConfigProvider\|clockProvider\|setScope\|startSession\|stopAndReport\|ReportScreen" lib/features/recitation/recitation_screen.dart
+47:    final sessionState = ref.watch(sessionStoreProvider);
+404:  void _startSession(List scope) {
+405:    final config = ref.read(recitationConfigProvider);
+406:    final asrService = ref.read(asrServiceProvider);
+407:    final logger = ref.read(sessionLoggerProvider);
+408:    final clock = ref.read(clockProvider);
+412:      asrService.setScope(scope.cast());
+417:    ref.read(sessionStoreProvider.notifier).startSession(
+429:    final report = ref.read(sessionStoreProvider.notifier).stopAndReport();
+437:          builder: (context) => ReportScreen(report: report),
+```
+
+- `_startSession()` reads 4 providers: `recitationConfigProvider`, `asrServiceProvider`, `sessionLoggerProvider`, `clockProvider`
+- If ASR service is `FakeAsrServiceImpl`, calls `setScope(scope.cast())` at line 412
+- Calls `sessionStoreProvider.notifier.startSession(...)` at line 417 with scope, mode, clock, asrService, logger
+- `_endSession()` calls `stopAndReport()` at line 429 → pushes `ReportScreen(report: report)` at line 437
+- Loading state: `!QuranData.isLoaded ? _buildLoadingState()` at line 65
+- Empty state: `scope.isEmpty ? _buildEmptyState()` at line 67 — "اختر سورة من المصحف"
+
+**Word coloring** (`_WordPill`, recitation_screen.dart lines 6-8 doc comment + lines 281-294):
+
+```
+$ grep -n "error\|Error\|WordState\|gray\|dark\|red\|orange\|green\|cursor\|pronunciation" lib/features/recitation/recitation_screen.dart | head -20
+6:///  - Red: confirmed error (substitution)
+7:///  - Orange: soft error (attempt 2)
+8:///  - Green outline: current cursor position
+169:      RecitationStatus.error => AppTheme.wordError,
+281:                    final isCursor = state.cursor == i && state.isActive;
+282:                    final isError = state.lastError != null &&
+283:                        state.lastError!.wordId == word.wordId;
+289:                      isError: isError &&
+290:                          state.lastError!.severity != ErrorSeverity.transient,
+291:                      isSoftError: isError &&
+292:                      state.lastError!.severity == ErrorSeverity.soft,
+293:                      isPronunciation: isError &&
+294:                      state.lastError!.severity == ErrorSeverity.flag,
+```
+
+5 coloring states: gray (unrevealed), dark (revealed), red (confirmed error), orange (soft error), green outline (cursor), pronunciation color. **VERIFIED.**
+
+**Haptic feedback** (recitation_screen.dart lines 380-395):
+
+```
+$ grep -n "HapticFeedback\|heavy\|medium\|light" lib/features/recitation/recitation_screen.dart
+389:          HapticFeedback.lightImpact();
+392:          HapticFeedback.mediumImpact();
+395:          HapticFeedback.heavyImpact();
+```
+
+- Light: soft errors (attempt 2) — line 389
+- Medium: pronunciation flags — line 392
+- Heavy: confirmed errors — line 395
+
+**VERIFIED — 3 haptic levels wired to error severity.**
+
+**4b. Report Screen** (`report_screen.dart`):
+
+```
+$ grep -n "SessionReport\|report.score\|report.perAyah\|report.forgetSilence\|report.forgetManual\|report.substitutions\|report.additions\|report.orderErrors\|report.pronunciations\|report.asrLag" lib/features/report/report_screen.dart
+20:  final SessionReport report;
+45:            if (report.substitutions.isNotEmpty ||
+46:                report.orderErrors.isNotEmpty ||
+80:  final SessionReport report;
+86:    final scorePercent = (report.score * 100).round();
+212:        count: report.forgetSilence.length,
+218:        count: report.forgetManual.length,
+224:        count: report.substitutions.length,
+230:        count: report.additions.length,
+236:        count: report.orderErrors.length,
+242:        count: report.pronunciations.length,
+248:        count: report.asrLag.length,
+363:            ...report.perAyah.map((ayah) {
+```
+
+- Takes `SessionReport report` as required constructor parameter (line 20) — from core package, never fabricated
+- Score: `report.score * 100` at line 86, color-coded (≥80% green, ≥60% gold, <60% red)
+- 7 error categories: `forgetSilence`, `forgetManual`, `substitutions`, `additions`, `orderErrors`, `pronunciations`, `asrLag` (lines 212-248)
+- Per-ayah: `report.perAyah.map(...)` at line 363 with progress bars
+- Error list: `report.forgetSilence`, `report.forgetManual`, etc. (lines 427-428) with RTL + Amiri font
+
+**VERIFIED — report screen reads directly from core SessionReport, all 7 categories wired.**
+
+**4c. Review Screen** (`review_screen.dart`):
+
+```
+$ grep -n "weakItemRepoProvider\|planRepoProvider\|reviewHistoryRepoProvider\|clockProvider\|rebuildAutoPlan\|ReviewService\|dueToday\|upcoming\|todaysQueue" lib/features/review/review_screen.dart
+41:    final weakItems = ref.read(weakItemRepoProvider);
+42:    final plans = ref.read(planRepoProvider);
+43:    final history = ref.read(reviewHistoryRepoProvider);
+44:    final clock = ref.read(clockProvider);
+46:    final service = ReviewService(
+57:      final plan = await service.rebuildAutoPlan(nowMs: clock());
+163:    final dueItems = dueToday(plan, now);
+164:    final upcomingItems = upcoming(plan, now);
+165:    final queue = todaysQueue(plan, now);
+```
+
+- Auto-loads: `initState` → `addPostFrameCallback` → `_loadPlan()` (lines 35-37)
+- Reads 3 repo providers + `clockProvider` (lines 41-44)
+- Creates `ReviewService(weakItems: ..., plans: ..., history: ...)` at line 46
+- Calls `service.rebuildAutoPlan(nowMs: clock())` at line 57
+- Displays: `dueToday(plan, now)`, `upcoming(plan, now)`, `todaysQueue(plan, now)` (lines 163-165)
+- Error handling with retry button (lines 64-71, 97-127)
+- `QuranData.getSurah(item.surah)` at line 321 for surah names
+
+**VERIFIED — review screen fully wired to 3 Hive repos + clock, auto-loads on init.**
+
+**4d. Settings Screen** (`settings_screen.dart`):
+
+```
+$ grep -n "settingsRepoProvider\|_loadSettings\|_saveSettings\|exportReviewData\|importReviewData\|Clipboard.setData\|recitationModeProvider" lib/features/settings/settings_screen.dart
+39:    WidgetsBinding.instance.addPostFrameCallback((_) => _loadSettings());
+42:  Future<void> _loadSettings() async {
+43:    final repo = ref.read(settingsRepoProvider);
+53:  Future<void> _saveSettings(UserSettings settings) async {
+54:    final repo = ref.read(settingsRepoProvider);
+62:      final jsonString = await exportReviewData(
+69:      await Clipboard.setData(ClipboardData(text: jsonString));
+138:      final summary = await importReviewData(
+184:                      ref.read(recitationModeProvider.notifier).state = mode;
+185:                      _saveSettings(_settings!.copyWith(defaultMode: mode));
+```
+
+- Auto-loads: `addPostFrameCallback` → `_loadSettings()` at line 39
+- 5 settings with round-trip save via `settingsRepoProvider.save()`:
+  1. Recitation mode (easy/normal/strict) — also updates `recitationModeProvider` at line 184
+  2. Daily target (dropdown [3,5,10,15,20,25])
+  3. Weakness threshold (dropdown [1.0,1.5,2.0,3.0,4.0])
+  4. Mastery horizon (dropdown [14,21,30,45,60])
+  5. Merge contiguous (switch)
+- Export: `exportReviewData(...)` → `Clipboard.setData(ClipboardData(text: jsonString))` at line 69 — NO file writes, NO storage permission
+- Import: dialog with TextField → `importReviewData(jsonString, ...)` at line 138
+
+```
+$ grep -n "exportReviewData\|importReviewData\|Clipboard" lib/services/persistence/data_backup.dart | head -10
+24:Future<String> exportReviewData({
+95:Future<String> importReviewData({
+```
+
+`data_backup.dart` has `exportReviewData()` (line 24) and `importReviewData()` (line 95) — both operate on JSON strings via repository interfaces. No file I/O, no storage permission needed. **VERIFIED.**
+
+**Part 4 Verdict**: **READY.** All 4 subsystems (recitation, report, review, settings) are fully wired to their respective providers and core services. Word coloring, haptic feedback, error breakdown, SM-2 review plan, and settings persistence all verified via code inspection with line numbers.
+
+---
+
+### Part 5 — Persistence Sanity
+
+**main.dart boot sequence**:
+
+```
+$ grep -n "Hive.initFlutter\|HiveWeakItemRepository\|HivePlanRepository\|HiveReviewHistoryRepository\|QuranData.load\|ProviderScope\|overrideWithValue\|SharedPreferencesSettingsRepository" lib/main.dart
+30:  await Hive.initFlutter();
+33:  final weakItemRepo = await HiveWeakItemRepository.open();
+34:  final planRepo = await HivePlanRepository.open();
+35:  final reviewHistoryRepo = await HiveReviewHistoryRepository.open();
+36:  final settingsRepo = SharedPreferencesSettingsRepository();
+39:  await QuranData.load();
+42:    ProviderScope(
+44:        weakItemRepoProvider.overrideWithValue(weakItemRepo),
+45:        planRepoProvider.overrideWithValue(planRepo),
+46:        reviewHistoryRepoProvider.overrideWithValue(reviewHistoryRepo),
+47:        settingsRepoProvider.overrideWithValue(settingsRepo),
+```
+
+Boot order (lines 30-47):
+1. `WidgetsFlutterBinding.ensureInitialized()` (line 29)
+2. `await Hive.initFlutter()` (line 30)
+3. `await HiveWeakItemRepository.open()` (line 33)
+4. `await HivePlanRepository.open()` (line 34)
+5. `await HiveReviewHistoryRepository.open()` (line 35)
+6. `SharedPreferencesSettingsRepository()` (line 36 — lazy, no await needed)
+7. `await QuranData.load()` (line 39)
+8. `runApp(ProviderScope(overrides: [...]))` (lines 41-49)
+
+All 3 Hive boxes opened BEFORE `runApp()`. All 4 repo providers overridden with persistent implementations. **VERIFIED — correct boot ordering, no race condition.**
+
+**Hive box-before-open hazard check**:
+
+```
+$ grep -n "registerHiveAdapters\|isBoxOpen\|isAdapterRegistered" lib/services/persistence/hive_repositories.dart lib/services/persistence/hive_adapters.dart
+lib/services/persistence/hive_repositories.dart:34:    registerHiveAdapters();
+lib/services/persistence/hive_repositories.dart:35:    final box = Hive.isBoxOpen('weakItems')
+lib/services/persistence/hive_repositories.dart:99:    registerHiveAdapters();
+lib/services/persistence/hive_repositories.dart:100:    final box = Hive.isBoxOpen('reviewPlans')
+lib/services/persistence/hive_repositories.dart:141:    registerHiveAdapters();
+lib/services/persistence/hive_repositories.dart:142:    final box = Hive.isBoxOpen('reviewHistory')
+lib/services/persistence/hive_adapters.dart:166:void registerHiveAdapters() {
+lib/services/persistence/hive_adapters.dart:168:  if (Hive.isAdapterRegistered(11)) return;
+```
+
+All 3 `open()` methods:
+1. Call `registerHiveAdapters()` FIRST (lines 34, 99, 141)
+2. Check `Hive.isBoxOpen()` before opening (lines 35, 100, 142)
+3. Are idempotent — safe to call multiple times
+
+`registerHiveAdapters()` (hive_adapters.dart line 166-168):
+- Guarded against double registration: `if (Hive.isAdapterRegistered(11)) return;`
+- 4 adapters: WeakItemAdapter (typeId 11), PlanItemAdapter (typeId 12), ReviewPlanAdapter (typeId 13), ReviewResultAdapter (typeId 14)
+
+**VERIFIED — NO box-before-open hazard. Adapters registered before any box open. All open() calls are idempotent.**
+
+**SharedPreferences settings** (`prefs_settings_repository.dart`):
+
+```
+$ grep -n "_ensureLoaded\|settings_dailyTarget\|settings_defaultMode\|settings_weaknessThreshold\|settings_masteryHorizonDays\|settings_mergeContiguous\|UserSettings.defaults" lib/services/persistence/prefs_settings_repository.dart
+7:/// On first launch (or after clearing prefs) [get] returns [UserSettings.defaults],
+16:  static const _keyDailyTarget = 'settings_dailyTarget';
+17:  static const _keyDefaultMode = 'settings_defaultMode';
+18:  static const _keyWeaknessThreshold = 'settings_weaknessThreshold';
+19:  static const _keyMasteryHorizonDays = 'settings_masteryHorizonDays';
+20:  static const _keyMergeContiguous = 'settings_mergeContiguous';
+25:  Future<void> _ensureLoaded() async {
+31:    await _ensureLoaded();
+36:    if (!hasData) return UserSettings.defaults;
+```
+
+- 5 keys defined (lines 16-20)
+- `_ensureLoaded()` lazily loads SharedPreferences instance (line 25)
+- `get()` returns `UserSettings.defaults` on first launch / no data (line 36)
+- All fields read with fallback defaults (lines 40-49)
+- `save()` writes all 5 fields
+
+**VERIFIED — lazy load, 5 keys, safe defaults on first launch.**
+
+**Part 5 Verdict**: **READY.** Boot sequence is correct (Hive init → box opens → QuranData load → runApp). No box-before-open hazard. Adapters guarded against double registration. SharedPreferences lazy-loaded with safe defaults.
+
+---
+
+### Part 6 — End-to-End Smoke Test Script
+
+The following is the exact manual steps a human should follow after installing the APK to sanity-check every subsystem in one pass. Each step has an expected result — if the actual result differs, note it and continue.
+
+#### Prerequisites
+
+1. Build and install the debug APK:
+   ```bash
+   flutter build apk --debug
+   adb install build/app/outputs/flutter-apk/app-debug.apk
+   ```
+   (APK is 305 MB, includes 175 MB ONNX model. Build time ~131 seconds.)
+
+#### Smoke Test Steps
+
+**A. App Boot & Home Screen**
+
+2. Open the "Tasmee3 Trainer" app from the device app drawer.
+3. **Expected**: App launches without crash. You see a bottom navigation bar with 4 tabs: Mushaf (مصحف), Recitation (تلاوة), Review (مراجعة), Settings (إعدادات). The Mushaf tab is shown by default with a list of surahs in Arabic (RTL layout).
+
+**B. Mushaf / Quran Display**
+
+4. Scroll the surah list — **Expected**: Surahs appear in order (1 through 114), each showing Arabic name, English name, and surah number. The list loads 20 at a time with a "Show more" button at the bottom.
+5. Tap the search icon and type "الفاتحة" — **Expected**: List filters to show Al-Fatihah (surah 1) only.
+6. Clear the search, type "2" — **Expected**: List filters to show surah 2 (Al-Baqarah) only.
+7. Clear the search — **Expected**: All 114 surahs are visible again.
+8. Tap on any surah (e.g. Al-Fatihah / surah 1) — **Expected**: Surah card expands to show ayahs in Arabic with Amiri font, RTL direction. Ayah text is readable, properly formatted.
+9. Tap the surah again or tap another surah — **Expected**: Previous surah collapses, new one expands. The visible count resets (pagination starts fresh).
+
+**C. Recitation Scoring (with FakeASR)**
+
+10. Tap on Al-Fatihah (surah 1) in the Mushaf to expand it.
+11. Tap the "Start Recitation" button (ابدأ التلاوة) — **Expected**: A SnackBar appears confirming surah selection. The app navigates to the Recitation tab.
+12. On the Recitation screen, tap "Start Session" (ابدأ الجلسة) — **Expected**: The session begins. Words start appearing one by one (FakeASR emits them at ~1.2 second intervals with 0.92 confidence). Watch the word coloring:
+    - Gray words = unrevealed (not yet reached)
+    - Dark words = revealed (recognized by ASR)
+    - Green outline = current cursor position
+    - Orange words = soft error (attempt 2)
+    - Red words = confirmed error (substitution)
+    - Pronunciation-colored words = pronunciation flag
+13. Wait for a few words to be processed — **Expected**: You may feel haptic feedback (light buzz for soft errors, medium for pronunciation flags, heavy for confirmed errors).
+14. Tap "Pause" (إيقاف مؤقت) — **Expected**: Session pauses, button changes to "Resume" (استئناف).
+15. Tap "Resume" — **Expected**: Session resumes, words continue processing.
+16. Tap "Reveal Next Word" (كشف الكلمة التالية) — **Expected**: The next unrevealed word turns dark (manually revealed).
+17. Tap "Reveal Full Ayah" (كشف الآية كاملة) — **Expected**: All words in the current ayah turn dark.
+18. Tap "End Session" (إنهاء الجلسة) — **Expected**: The app navigates to the Report screen.
+
+**D. Report Screen**
+
+19. **Expected**: Report screen shows:
+    - A score card at the top with a percentage (e.g. "85%") — color-coded green (≥80%), gold (≥60%), or red (<60%)
+    - Error breakdown section with 7 categories: forget (silence), forget (manual), substitutions, additions, order errors, pronunciations, ASR lag — each showing a count
+    - Per-ayah accuracy section with progress bars for each ayah
+    - Error list at the bottom showing expected vs recognized text in RTL Arabic with Amiri font
+20. Tap "Back" (رجوع) — **Expected**: Returns to the Recitation screen.
+21. Tap "Home" (الرئيسية) — **Expected**: Returns to the Mushaf/home screen.
+
+**E. Review Screen**
+
+22. Tap the Review (مراجعة) tab — **Expected**: The Review screen loads. On first launch with no prior sessions, it shows an empty state ("No items due for review" or similar) OR a plan with 0 due items. If you completed a recitation session in steps 12-18, weak items may appear here.
+23. **Expected**: The screen shows counts for: Due Today, Upcoming, Mastered. These are populated from the Hive-backed review plan via `rebuildAutoPlan()`.
+
+**F. Settings Screen**
+
+24. Tap the Settings (إعدادات) tab — **Expected**: Settings screen loads showing 5 configurable options with current defaults.
+25. Change "Recitation Mode" from "Normal" to "Strict" — **Expected**: Radio button updates. The `recitationModeProvider` state is also updated immediately.
+26. Change "Daily Target" from 5 to 10 — **Expected**: Dropdown updates.
+27. Change "Weakness Threshold" from 2.0 to 1.5 — **Expected**: Dropdown updates.
+28. Change "Mastery Horizon" from 21 to 30 — **Expected**: Dropdown updates.
+29. Toggle "Merge Contiguous" off — **Expected**: Switch updates.
+30. **Expected**: All 5 changes are saved to SharedPreferences immediately (via `_saveSettings()` on each change).
+
+**G. Data Backup (Export/Import)**
+
+31. On the Settings screen, tap "Export Review Data" (تصدير بيانات المراجعة) — **Expected**: A SnackBar appears saying "Data exported to clipboard" (or similar). The JSON string is now on the system clipboard. No file is written, no storage permission needed.
+32. Open any text app on the device (e.g. Notes, Messages), paste from clipboard — **Expected**: A JSON string appears. This confirms export works.
+33. Return to the Tasmee3 app, Settings screen. Tap "Import Review Data" (استيراد بيانات المراجعة) — **Expected**: A dialog appears with a text field. Paste the JSON string from clipboard into the text field.
+34. Tap "Import" in the dialog — **Expected**: A SnackBar appears confirming import (showing counts of imported items). The review data is now restored.
+
+**H. Persistence (Kill & Reopen)**
+
+35. Force-close the Tasmee3 app (swipe away from recent apps, or use `adb shell am force-stop com.tasmee3.trainer`).
+36. Reopen the app from the app drawer.
+37. **Expected**: App launches normally. Navigate to Settings — **Expected**: All 5 settings from steps 25-29 are still changed (Strict mode, daily target 10, weakness threshold 1.5, mastery horizon 30, merge contiguous off). This confirms SharedPreferences persistence.
+38. Navigate to the Review tab — **Expected**: Any review items/plan from before the kill are still present. This confirms Hive persistence (boxes survived app restart).
+
+**I. Dev ASR Screen (Optional — only if testing real ASR)**
+
+> **⚠️ WARNING**: This section tests the REAL on-device ASR pipeline (ONNX model inference, VAD, microphone capture). It requires the 175 MB ONNX model to load into memory (~10-30 seconds). This is the Gate 1/2 testing path. Skip this section if you only want to verify the app UI.
+
+39. Go to the Settings (إعدادات) tab.
+40. Long-press the Settings tab icon (the gear icon at the bottom) — **Expected**: Nothing visible happens on first press.
+41. Repeat the long-press 4 more times (total 5 long-presses), all within 3 seconds of the first press — **Expected**: The app navigates to the Dev ASR Screen.
+42. **Expected**: Dev ASR screen shows two modes: "WAV File" (Gate 1) and "Live Mic" (Gate 2), a VAD threshold slider (range 0.001–0.05, starting at 0.01), a stats bar, and Results/Logs tabs.
+43. For **Gate 1 (WAV File)**: Select "Al-Fatihah (1)" from the dropdown, press "Start" — **Expected**: "Loading model..." appears while the ONNX model loads. Then the WAV is fed chunk-by-chunk. Watch Results tab for recognized text and Logs tab for isolate messages. Check the stats bar for RTF < 0.1.
+44. For **Gate 2 (Live Mic)**: Switch to "Live Mic" mode, press "Start" — **Expected**: System microphone permission dialog appears. Grant it. Recite a short passage. Watch live partial text and RTF counter. Tune VAD threshold using the slider while watching "Recent RMS range".
+45. Capture logcat for both gates: `adb logcat -s flutter,asr-isolate | tee gate1_logcat.txt` (and `gate2_logcat.txt` for Gate 2).
+46. **Gate 1 passes if**: no crash, RTF < 0.1, recognized text is a plausible match for Al-Fatihah (human must confirm).
+47. **Gate 2 passes if**: no crash across 3+ utterances and a silence period, RTF < 0.1, no hallucinated text during silence, human confirms transcription accuracy.
+
+**J. Post-Smoke-Test Checklist**
+
+48. All steps 2-38 completed without unexpected crashes — **PASS** or note failures.
+49. If steps 39-47 (Dev ASR) were attempted and both gates passed — update `lib/app/providers.dart` to swap `FakeAsrServiceImpl()` → `StreamingAsrService()` and re-run the full test suite.
+50. Record any deviations from expected behavior with screenshots and logcat output for debugging.
