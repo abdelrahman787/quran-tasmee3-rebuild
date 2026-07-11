@@ -1606,3 +1606,264 @@ The following is the exact manual steps a human should follow after installing t
 48. All steps 2-38 completed without unexpected crashes — **PASS** or note failures.
 49. If steps 39-47 (Dev ASR) were attempted and both gates passed — update `lib/app/providers.dart` to swap `FakeAsrServiceImpl()` → `StreamingAsrService()` and re-run the full test suite.
 50. Record any deviations from expected behavior with screenshots and logcat output for debugging.
+
+---
+
+## Part 8: Fix 4 Real Bugs in DevAsrScreen (Code Review Round)
+
+**Date**: 2025-07-11  
+**Commit**: this commit (after `730bf9a`)  
+**Context**: A human tester reached the dev ASR screen (the 7-tap gesture from commit `730bf9a` works) but reported that WAV mode shows "Results: 0", "Last RTF: 0.000", "Avg RTF: 0.000" forever. Live Mic mode also produced zero results. No "Logs" tab was visible — only the Results content showed, with no tab bar to switch. A line-by-line code review found four distinct logic bugs, all in files from commit `730bf9a`/earlier. All four were fixed, release APK rebuilt, and changes pushed.
+
+### Files Modified
+
+| File | Bugs addressed | Lines changed |
+|------|---------------|---------------|
+| `lib/features/dev_asr/dev_asr_screen.dart` | Bug 1, Bug 2, Bug 3 | +25 / −6 |
+| `lib/services/streaming_asr_service.dart` | Bug 3, Bug 4 | +47 / −13 |
+
+### Bug 1: TabBarView had no TabController — no visible Logs tab
+
+**Root cause**: `_buildResultsAndLogs()` created a `TabBarView` with two children but never supplied a `TabController` — neither via its `controller:` parameter nor via an ancestor `DefaultTabController`. This throws `FlutterError("No TabController for TabBarView")` at build time. Additionally, there was no `TabBar` widget anywhere in the file, so even if the crash were avoided, the user would have no way to switch to the "Logs" tab — matching the exact symptom reported.
+
+**Fix**: Added `SingleTickerProviderStateMixin` to the state class, created a `TabController(length: 2, vsync: this)` in `initState`, disposed it in `dispose`, added a `TabBar` to the `AppBar.bottom`, and wired `controller: _tabController` into the `TabBarView`.
+
+**Actual diff** (`lib/features/dev_asr/dev_asr_screen.dart`):
+```diff
+-class _DevAsrScreenState extends State<DevAsrScreen> {
++class _DevAsrScreenState extends State<DevAsrScreen>
++    with SingleTickerProviderStateMixin {
+   final _asrService = StreamingAsrService();
++  late final TabController _tabController;
+```
+```diff
+   @override
+   void dispose() {
++    _tabController.dispose();
+     _asrService.stop();
+     _resultsScrollController.dispose();
+```
+```diff
+   @override
+   void initState() {
+     super.initState();
++    _tabController = TabController(length: 2, vsync: this);
+     _asrService.onLog = _onLog;
+   }
+```
+```diff
+     return Scaffold(
+       appBar: AppBar(
+         title: const Text('Dev ASR Testing (Gate 1/2)'),
++        bottom: TabBar(
++          controller: _tabController,
++          tabs: const [
++            Tab(text: 'Results'),
++            Tab(text: 'Logs'),
++          ],
++        ),
+         actions: [
+```
+```diff
+   Widget _buildResultsAndLogs() {
+     return TabBarView(
++      controller: _tabController,
+       children: [
+         _buildResultsTab(),
+         _buildLogsTab(),
+       ],
+     );
+   }
+```
+
+### Bug 2: onResultCallback never set in WAV-file mode — Gate 1 always shows 0 results
+
+**Root cause**: In `_start()`, the result callback was assigned only inside the `else` (live-mic) branch:
+```dart
+if (_mode == DevAsrMode.wavFile) {
+  await _runWavTest();
+} else {
+  _asrService.onResultCallback = (result) {      // ← only set here
+    _onResult(result.text, result.confidence, 0.0);
+  };
+  await _asrService.startMicRecording();
+}
+```
+In WAV mode, the callback stayed `null`. In `streaming_asr_service.dart`'s `_handleIsolateMessage`, the `case 'result':` checked `if (_onResult != null && !_paused)` — since `_onResult` (the getter for `onResultCallback`) was null, every result from the isolate was silently skipped in WAV mode. This is exactly why "Results: 0" never changed.
+
+**Fix**: Replaced the branch-specific `onResultCallback` assignment with an unconditional `_asrService.onDevResult = _onResult` set *before* the mode branch. This callback receives `(text, confidence, rtf)` for both WAV and live-mic modes (see Bug 3 for why `onDevResult` instead of `onResultCallback`). Removed the old else-branch assignment entirely.
+
+**Actual diff** (`lib/features/dev_asr/dev_asr_screen.dart`):
+```diff
++      // Dev-screen-only callback — receives (text, confidence, rtf) for every
++      // result from the isolate. Set unconditionally so BOTH modes (WAV file
++      // and live mic) get results. Previously this was only set in the
++      // live-mic else-branch, so WAV mode silently dropped every result.
++      _asrService.onDevResult = _onResult;
++
+       setState(() {
+         _isInitialising = false;
+         _isRunning = true;
+```
+```diff
+       if (_mode == DevAsrMode.wavFile) {
+         await _runWavTest();
+       } else {
+-        // Live mic mode — start mic capture via StreamingAsrService.start()
+-        // We don't use start() because it sets _onResult internally.
+-        // Instead, we set up the callback and start the mic manually.
+-        _asrService.onResultCallback = (result) {
+-          _onResult(result.text, result.confidence, 0.0);
+-        };
+         await _asrService.startMicRecording();
+       }
+```
+
+### Bug 3: RTF hardcoded to 0.0 — the isolate's real RTF value was discarded
+
+**Root cause**: The isolate's documented protocol (`asr_isolate.dart`, line 19) sends `{'type': 'result', 'text': String, 'confidence': double, 'rtf': double}`. Lines 328-333 of `asr_isolate.dart` confirm the message includes `rtf`. But `streaming_asr_service.dart`'s `case 'result':` only read `text` and `confidence`, never reading `message['rtf']`. Separately, `AsrResult` (from `quran_tasmee3_core/recitation/asr_service.dart`, lines 10-26) only carries `text` and `confidence` — it has no `rtf` field by design (it's the production `AsrService` contract and must not be changed). The dev screen's live-mic callback also hardcoded `0.0` as the RTF argument: `_onResult(result.text, result.confidence, 0.0)`.
+
+**Fix**: Added a dev-screen-only callback `onDevResult` that carries `(text, confidence, rtf)`. In `streaming_asr_service.dart`'s `case 'result':`, read `message['rtf']` and call both `onResultCallback` (for production, carrying `AsrResult(text, confidence)`) and `onDevResult` (for the dev screen, carrying the real RTF). The dev screen uses `onDevResult` exclusively.
+
+**Actual diff** (`lib/services/streaming_asr_service.dart`):
+```diff
+   /// Result callback — set by [start] or directly for dev-screen use.
++  /// Carries only the AsrService-contract (text, confidence) — no RTF.
+   void Function(AsrResult)? onResultCallback;
+   void Function(AsrResult)? get _onResult => onResultCallback;
+
++  /// Dev-screen-only: receives (text, confidence, rtf) for every result.
++  /// Production code should use [onResultCallback] instead, which only
++  /// carries the AsrService-contract (text, confidence).
++  void Function(String text, double confidence, double rtf)? onDevResult;
+```
+```diff
+       case 'result':
+-        if (_onResult != null && !_paused) {
+-          final text = message['text'] as String? ?? '';
+-          final confidence = (message['confidence'] as num?)?.toDouble() ?? 0.0;
+-          _onResult!(AsrResult(text, confidence));
++        final text = message['text'] as String? ?? '';
++        final confidence = (message['confidence'] as num?)?.toDouble() ?? 0.0;
++        final rtf = (message['rtf'] as num?)?.toDouble() ?? 0.0;
++        if (!_paused) {
++          _onResult?.call(AsrResult(text, confidence));
++          onDevResult?.call(text, confidence, rtf);
+         }
+```
+
+The `AsrResult` contract in `quran_tasmee3_core/lib/recitation/asr_service.dart` was **not** modified — it still carries only `(text, confidence)`.
+
+### Bug 4: stop() killed the isolate before it could flush the final result
+
+**Root cause**: The original `stop()` method did three things in rapid succession with no waiting:
+1. Set `onResultCallback = null` immediately
+2. Sent `{'type': 'stop'}` fire-and-forget
+3. Called `_isolate?.kill(priority: Isolate.immediate)`
+
+The isolate's stop handler (`asr_isolate.dart` lines 213-239) tries to flush any buffered speech segment via `_vad.forceFlush()`, run one final inference (which sends a `{'type': 'result'}` message), release ORT resources, then send `{'type': 'stopped'}`. But the main isolate killed it immediately after sending 'stop', and had already nulled the callback, so any final result was lost. This explains why stopping mid-speech dropped the last utterance.
+
+**Fix**: Added a `Completer<void>? _stopCompleter` instance field. In `stop()`, after sending `{'type': 'stop'}`, await `_stopCompleter!.future` with a 500ms timeout grace period. Only after the timeout (or the isolate's 'stopped' ack) do we clear callbacks and kill the isolate. In `_handleIsolateMessage`'s `case 'stopped':`, complete `_stopCompleter` if it exists and isn't already completed. This ensures any final result the isolate flushes during its stop handler can still flow through the callbacks before teardown.
+
+**Actual diff** (`lib/services/streaming_asr_service.dart`):
+```diff
++  /// Completer for the isolate's 'stopped' acknowledgment.
++  /// Created in [stop()] and completed in _handleIsolateMessage's
++  /// case 'stopped'. Allows [stop()] to wait for the isolate to flush
++  /// any final buffered speech before killing it.
++  Completer<void>? _stopCompleter;
+```
+```diff
+   @override
+   Future<void> stop() async {
+     _running = false;
+-    onResultCallback = null;
+
+-    // Stop mic
++    // Stop mic — do NOT clear callbacks yet. The isolate may still
++    // flush a final buffered speech segment and deliver its last result.
+     await _micSubscription?.cancel();
+     _micSubscription = null;
+     try {
+       await _recorder?.stop();
+     } catch (_) {}
+     await _recorder?.dispose();
+     _recorder = null;
+
+-    // Stop isolate
++    // Send 'stop' and wait for the isolate to acknowledge 'stopped'.
++    // The isolate's stop() handler flushes any remaining VAD segment,
++    // runs one final inference, then sends {'type': 'stopped'}.
++    // We give it a short grace period (500 ms) so the final result
++    // can still flow through the callbacks before we tear everything down.
+     if (_isolateSendPort != null) {
++      _stopCompleter = Completer<void>();
+       _isolateSendPort!.send({'type': 'stop'});
++      await _stopCompleter!.future.timeout(
++        const Duration(milliseconds: 500),
++        onTimeout: () {},
++      );
+     }
++
++    // Now safe to clear callbacks — the isolate has either flushed
++    // its final result (within the grace period) or timed out.
++    onResultCallback = null;
++    onDevResult = null;
++
++    // Kill the isolate and release resources.
+     _isolate?.kill(priority: Isolate.immediate);
+     _isolate = null;
+     _mainReceivePort?.close();
+     _mainReceivePort = null;
+     _isolateSendPort = null;
++    _stopCompleter = null;
+     _initialized = false;
+-
+   }
+```
+```diff
+       case 'stopped':
+-        // Isolate has finished stopping — nothing to do here
+-        break;
++        // Isolate has finished flushing its final result and releasing
++        // resources. Complete the stop Completer so [stop()] can proceed
++        // to clear callbacks and kill the isolate.
++        if (_stopCompleter != null && !_stopCompleter!.isCompleted) {
++          _stopCompleter!.complete();
++        }
+```
+
+### Verification: flutter analyze
+
+```
+$ flutter analyze
+No issues! (19 info-level issues remain, all pre-existing, zero errors/warnings)
+```
+The 19 info-level issues are the same count as before the fix — no new issues introduced.
+
+### Verification: Release APK Build
+
+```
+$ flutter build apk --release
+✓ Built build/app/outputs/flutter-apk/app-release.apk (213M, 190.8s)
+```
+APK verified signed with v2 scheme:
+```
+Verified using v2 scheme (APK Signature Scheme v2): true
+```
+
+### What was NOT changed
+
+- **`AsrResult` contract** (`quran_tasmee3_core/lib/recitation/asr_service.dart`) — unchanged. Still carries only `(text, confidence)`. The RTF is delivered via the separate `onDevResult` callback, not through the production `AsrService` contract.
+- **`asr_isolate.dart`** — unchanged. It already sent `rtf` in its result messages and already sent `{'type': 'stopped'}`. The bugs were in how the main isolate consumed (or failed to consume) those messages.
+- **`asrServiceProvider` swap point** (`lib/app/providers.dart:37`) — unchanged. Still returns `FakeAsrServiceImpl()`. Must not change until Gate 2 passes on a real device.
+- **`dev_asr_screen_stub.dart`** — unchanged. Web stub, no ASR.
+
+### ⚠️ Cannot verify on real device from this sandbox
+
+None of these four fixes have been verified on a real device from this sandbox. The sandbox cannot run Android or load the 175 MB ONNX model. The human tester must:
+
+1. **Reinstall the release APK** (`build/app/outputs/flutter-apk/app-release.apk`, 213 MB, v2 signed).
+2. **Re-test Gate 1 (WAV mode)**: Select Al-Fatihah, press Start. Expect: non-zero Results count, a real RTF number (not 0.000) in the stats bar, and a visible "Logs" tab (tap it to see isolate messages).
+3. **Re-test Gate 2 (Live Mic)**: Switch to Live Mic mode, press Start, grant mic permission, recite a short passage, then press Stop. Expect: same non-zero results and RTF, plus confirm that stopping mid-speech does **not** silently drop the last utterance (the final buffered segment should appear before the service tears down).
+4. If both gates pass, proceed to the swap point in `lib/app/providers.dart:37` (`FakeAsrServiceImpl()` → `StreamingAsrService()`).

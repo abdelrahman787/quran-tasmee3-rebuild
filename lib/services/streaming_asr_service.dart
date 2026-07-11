@@ -56,8 +56,14 @@ import 'asr/asr_isolate.dart';
 class StreamingAsrService implements AsrService {
   // ── Callbacks ──────────────────────────────────────────────────────────
   /// Result callback — set by [start] or directly for dev-screen use.
+  /// Carries only the AsrService-contract (text, confidence) — no RTF.
   void Function(AsrResult)? onResultCallback;
   void Function(AsrResult)? get _onResult => onResultCallback;
+
+  /// Dev-screen-only: receives (text, confidence, rtf) for every result.
+  /// Production code should use [onResultCallback] instead, which only
+  /// carries the AsrService-contract (text, confidence).
+  void Function(String text, double confidence, double rtf)? onDevResult;
 
   /// Optional log callback — receives all isolate log messages.
   /// Used by the dev screen for VAD tuning and diagnostics.
@@ -68,6 +74,12 @@ class StreamingAsrService implements AsrService {
   SendPort? _isolateSendPort;
   ReceivePort? _mainReceivePort;
   bool _initialized = false;
+
+  /// Completer for the isolate's 'stopped' acknowledgment.
+  /// Created in [stop()] and completed in _handleIsolateMessage's
+  /// case 'stopped'. Allows [stop()] to wait for the isolate to flush
+  /// any final buffered speech before killing it.
+  Completer<void>? _stopCompleter;
 
   // ── Mic state ──────────────────────────────────────────────────────────
   AudioRecorder? _recorder;
@@ -117,9 +129,9 @@ class StreamingAsrService implements AsrService {
   @override
   Future<void> stop() async {
     _running = false;
-    onResultCallback = null;
 
-    // Stop mic
+    // Stop mic — do NOT clear callbacks yet. The isolate may still
+    // flush a final buffered speech segment and deliver its last result.
     await _micSubscription?.cancel();
     _micSubscription = null;
     try {
@@ -130,17 +142,33 @@ class StreamingAsrService implements AsrService {
     await _recorder?.dispose();
     _recorder = null;
 
-    // Stop isolate
+    // Send 'stop' and wait for the isolate to acknowledge 'stopped'.
+    // The isolate's stop() handler flushes any remaining VAD segment,
+    // runs one final inference, then sends {'type': 'stopped'}.
+    // We give it a short grace period (500 ms) so the final result
+    // can still flow through the callbacks before we tear everything down.
     if (_isolateSendPort != null) {
+      _stopCompleter = Completer<void>();
       _isolateSendPort!.send({'type': 'stop'});
+      await _stopCompleter!.future.timeout(
+        const Duration(milliseconds: 500),
+        onTimeout: () {},
+      );
     }
+
+    // Now safe to clear callbacks — the isolate has either flushed
+    // its final result (within the grace period) or timed out.
+    onResultCallback = null;
+    onDevResult = null;
+
+    // Kill the isolate and release resources.
     _isolate?.kill(priority: Isolate.immediate);
     _isolate = null;
     _mainReceivePort?.close();
     _mainReceivePort = null;
     _isolateSendPort = null;
+    _stopCompleter = null;
     _initialized = false;
-
   }
 
   // ── Extended API for dev screen (Gate 1/2) ─────────────────────────────
@@ -294,10 +322,12 @@ class StreamingAsrService implements AsrService {
         readyCompleter.completeError(Exception('ASR isolate init failed: $error'));
 
       case 'result':
-        if (_onResult != null && !_paused) {
-          final text = message['text'] as String? ?? '';
-          final confidence = (message['confidence'] as num?)?.toDouble() ?? 0.0;
-          _onResult!(AsrResult(text, confidence));
+        final text = message['text'] as String? ?? '';
+        final confidence = (message['confidence'] as num?)?.toDouble() ?? 0.0;
+        final rtf = (message['rtf'] as num?)?.toDouble() ?? 0.0;
+        if (!_paused) {
+          _onResult?.call(AsrResult(text, confidence));
+          onDevResult?.call(text, confidence, rtf);
         }
 
       case 'log':
@@ -308,8 +338,12 @@ class StreamingAsrService implements AsrService {
         }
 
       case 'stopped':
-        // Isolate has finished stopping — nothing to do here
-        break;
+        // Isolate has finished flushing its final result and releasing
+        // resources. Complete the stop Completer so [stop()] can proceed
+        // to clear callbacks and kill the isolate.
+        if (_stopCompleter != null && !_stopCompleter!.isCompleted) {
+          _stopCompleter!.complete();
+        }
     }
   }
 }

@@ -49,8 +49,9 @@ const _testWavs = <String, String>{
 
 /// Dev ASR testing screen — Gate 1/2 validation.
 ///
-/// Access: long-press the Settings tab icon 5 times, or navigate to
-/// this screen directly (hidden route).
+/// Access: tap the version/about row 7 times in Settings (Android
+/// "Developer options" convention), or navigate to this screen directly
+/// (hidden route).
 class DevAsrScreen extends StatefulWidget {
   const DevAsrScreen({super.key});
 
@@ -58,8 +59,10 @@ class DevAsrScreen extends StatefulWidget {
   State<DevAsrScreen> createState() => _DevAsrScreenState();
 }
 
-class _DevAsrScreenState extends State<DevAsrScreen> {
+class _DevAsrScreenState extends State<DevAsrScreen>
+    with SingleTickerProviderStateMixin {
   final _asrService = StreamingAsrService();
+  late final TabController _tabController;
 
   DevAsrMode _mode = DevAsrMode.wavFile;
   String _selectedWav = _testWavs.keys.first;
@@ -87,6 +90,7 @@ class _DevAsrScreenState extends State<DevAsrScreen> {
 
   @override
   void dispose() {
+    _tabController.dispose();
     _asrService.stop();
     _resultsScrollController.dispose();
     _logsScrollController.dispose();
@@ -96,6 +100,7 @@ class _DevAsrScreenState extends State<DevAsrScreen> {
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
     _asrService.onLog = _onLog;
   }
 
@@ -165,6 +170,12 @@ class _DevAsrScreenState extends State<DevAsrScreen> {
       await _asrService.init();
       _asrService.setVadThreshold(_vadThreshold);
 
+      // Dev-screen-only callback — receives (text, confidence, rtf) for every
+      // result from the isolate. Set unconditionally so BOTH modes (WAV file
+      // and live mic) get results. Previously this was only set in the
+      // live-mic else-branch, so WAV mode silently dropped every result.
+      _asrService.onDevResult = _onResult;
+
       setState(() {
         _isInitialising = false;
         _isRunning = true;
@@ -173,12 +184,6 @@ class _DevAsrScreenState extends State<DevAsrScreen> {
       if (_mode == DevAsrMode.wavFile) {
         await _runWavTest();
       } else {
-        // Live mic mode — start mic capture via StreamingAsrService.start()
-        // We don't use start() because it sets _onResult internally.
-        // Instead, we set up the callback and start the mic manually.
-        _asrService.onResultCallback = (result) {
-          _onResult(result.text, result.confidence, 0.0);
-        };
         await _asrService.startMicRecording();
       }
     } catch (e) {
@@ -244,6 +249,13 @@ class _DevAsrScreenState extends State<DevAsrScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Dev ASR Testing (Gate 1/2)'),
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(text: 'Results'),
+            Tab(text: 'Logs'),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.delete_outline),
@@ -461,6 +473,7 @@ class _DevAsrScreenState extends State<DevAsrScreen> {
 
   Widget _buildResultsAndLogs() {
     return TabBarView(
+      controller: _tabController,
       children: [
         _buildResultsTab(),
         _buildLogsTab(),
